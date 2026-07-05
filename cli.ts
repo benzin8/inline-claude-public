@@ -1,25 +1,24 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
- * inline-claude CLI — interactive setup wizard
- * Usage: bunx inline-claude setup
+ * inline-claude CLI — MCP server entry + interactive setup wizard
+ * Usage:
+ *   npx inline-claude          — start the MCP server (used in .mcp.json)
+ *   npx inline-claude setup    — interactive setup wizard
  */
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import * as readline from 'readline'
 
-const STEPS = [
-  'telegram-api',
-  'userbot',
-  'bot',
-  'business',
-  'env',
-  'mcp-json',
-  'test',
-] as const
+// readline is created lazily — creating it eagerly would consume process.stdin,
+// which the MCP stdio transport needs when the server starts.
+let rl: readline.Interface | undefined
+function ask(q: string): Promise<string> {
+  if (!rl) rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  return new Promise(resolve => rl!.question(q, resolve))
+}
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-const ask = (q: string): Promise<string> => new Promise(resolve => rl.question(q, resolve))
+const INSTALL_DIR = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
 
 function print(s: string) { process.stdout.write(s + '\n') }
 function hr() { print('\n' + '─'.repeat(50) + '\n') }
@@ -50,7 +49,7 @@ async function stepUserbot(apiId: string, apiHash: string) {
 
   if (!existsSync(ubDir)) {
     print(`Папка ${ubDir} не найдена.`)
-    print('Создай её и скопируй туда auth.py из репо.')
+    print('Создай её и скопируй туда auth.py + send_message.py из репо.')
     await ask('Нажми Enter когда готово...')
   }
 
@@ -86,7 +85,7 @@ async function stepBusiness() {
   print('Шаг 4/7 — Business Bot (опционально, нужен Telegram Premium)')
   print('')
   const hasPremium = (await ask('У тебя есть Telegram Premium? (да/нет): ')).trim().toLowerCase()
-  if (!hasPremium.startsWith('д')) {
+  if (!hasPremium.startsWith('д') && !hasPremium.startsWith('y')) {
     print('Пропускаем — Business Bot можно добавить позже.')
     return false
   }
@@ -108,8 +107,7 @@ async function stepEnv(token: string, botUsername: string) {
   const ownerId = (await ask('Введи свой Telegram ID: ')).trim()
   if (!ownerId) throw new Error('OWNER_ID обязателен')
 
-  const installDir = join(homedir(), '.claude', 'inline-bot')
-  const envPath = join(installDir, '.env')
+  const envPath = join(INSTALL_DIR, '.env')
   const bridgeTarget = botUsername ? `@${botUsername}` : ''
 
   const envContent = [
@@ -128,24 +126,22 @@ async function stepMcpJson() {
   hr()
   print('Шаг 6/7 — Подключить к Claude Code')
   print('')
-  const installDir = join(homedir(), '.claude', 'inline-bot')
   const projectDir = (await ask('Путь к папке проекта Claude Code (Enter = текущая): ')).trim() || process.cwd()
 
-  const mcpJson = {
-    mcpServers: {
-      'inline-claude': {
-        command: 'bun',
-        args: ['run', '--cwd', installDir, '--silent', 'start'],
-      },
-    },
+  const serverEntry = {
+    command: 'npx',
+    args: ['-y', 'inline-claude'],
   }
 
   const mcpPath = join(projectDir, '.mcp.json')
-  let existing: Record<string, unknown> = {}
+  let existing: { mcpServers?: Record<string, unknown> } = {}
   if (existsSync(mcpPath)) {
     try { existing = JSON.parse(readFileSync(mcpPath, 'utf8')) } catch {}
   }
-  const merged = { ...existing, mcpServers: { ...(existing.mcpServers as Record<string, unknown> ?? {}), ...mcpJson.mcpServers } }
+  const merged = {
+    ...existing,
+    mcpServers: { ...(existing.mcpServers ?? {}), 'inline-claude': serverEntry },
+  }
   writeFileSync(mcpPath, JSON.stringify(merged, null, 2) + '\n')
   print(`✅ Записал ${mcpPath}`)
   print('')
@@ -165,23 +161,9 @@ async function stepTest(botUsername: string) {
   print('✅ Установка завершена!')
 }
 
-async function main() {
-  const cmd = process.argv[2]
-
-  if (cmd !== 'setup') {
-    print('inline-claude — Telegram inline + Business Bot MCP сервер')
-    print('')
-    print('Команды:')
-    print('  bunx inline-claude setup   — интерактивная установка')
-    print('  bun run start              — запустить сервер')
-    print('')
-    print('Документация: https://github.com/benzin8/inline-claude-public')
-    rl.close()
-    return
-  }
-
+async function runSetup() {
   print('╔══════════════════════════════════════╗')
-  print('║  inline-claude — Установка           ║')
+  print('║  inline-claude — Установка            ║')
   print('╚══════════════════════════════════════╝')
   print('')
   print('Проведу тебя через 7 шагов. После каждого жди подтверждения.')
@@ -196,10 +178,33 @@ async function main() {
     await stepTest(botUsername)
   } catch (e) {
     print(`\n❌ Ошибка: ${e instanceof Error ? e.message : e}`)
-    print('Попробуй снова: bunx inline-claude setup')
+    print('Попробуй снова: npx inline-claude setup')
   } finally {
-    rl.close()
+    rl?.close()
   }
+}
+
+async function main() {
+  const cmd = process.argv[2]
+
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    print('inline-claude — Telegram inline + Business Bot MCP сервер')
+    print('')
+    print('Команды:')
+    print('  npx inline-claude          — запустить MCP сервер (для .mcp.json)')
+    print('  npx inline-claude setup    — интерактивная установка')
+    print('')
+    print('Документация: https://github.com/benzin8/inline-claude-public')
+    return
+  }
+
+  if (cmd === 'setup') {
+    await runSetup()
+    return
+  }
+
+  // Default: start the MCP server (this is what .mcp.json invokes).
+  await import('./server.js')
 }
 
 main()

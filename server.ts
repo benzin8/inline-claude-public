@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * Inline "Ask Claude" bot — lets the owner invoke Claude via @bot inline in ANY
  * chat, like @mira. Answers are routed through THIS Claude Code session:
@@ -18,9 +17,11 @@ import { Bot, GrammyError, API_CONSTANTS, InlineKeyboard } from 'grammy'
 import { readFileSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { saveMessage, getHistory } from './db'
+import { execFile } from 'child_process'
+import { saveMessage } from './db.js'
 
-const HERE = join(homedir(), '.claude', 'inline-bot')
+const HERE = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
+mkdirSync(HERE, { recursive: true })
 const ENV_FILE = join(HERE, '.env')
 const LOG_FILE = join(HERE, 'events.log')
 function elog(msg: string): void {
@@ -30,12 +31,12 @@ function elog(msg: string): void {
 // --- FALLBACK delivery via the working bridge channel ---
 // The harness does NOT surface this 2nd MCP server's claude/channel
 // notifications into the session, so inline questions never arrive that way.
-// Workaround: дима's userbot DMs the trigger "[[ic:<id>]] <query>" to the
-// bridge bot (@claudemagday_bot). That message surfaces to the session through
+// Workaround: the owner's userbot DMs the trigger "[[ic:<id>]] <query>" to the
+// bridge bot (BRIDGE_TARGET). That message surfaces to the session through
 // the telegram plugin's WORKING channel; Claude recognizes the [[ic:ID]] prefix
 // and answers via the inline_answer tool (which edits the inline placeholder).
-const PYTHON = 'C:\\Python314\\python.exe'
-const USERBOT_DIR = join(homedir(), '.claude', 'userbot')
+const PYTHON = process.env.INLINE_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
+const USERBOT_DIR = process.env.INLINE_USERBOT_DIR ?? join(homedir(), '.claude', 'userbot')
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
 const BRIDGE_TARGET = process.env.BRIDGE_TARGET ?? ''
 function deliverViaBridge(request_id: string, query: string, tag: string, historyBlock?: string): void {
@@ -52,16 +53,11 @@ function deliverViaBridge(request_id: string, query: string, tag: string, histor
       if (content.length + suffix.length <= 4090) content += suffix
     }
     writeFileSync(tmp, content)
-    const proc = Bun.spawn([PYTHON, SEND_PY, BRIDGE_TARGET, tmp], {
-      cwd: USERBOT_DIR, stdout: 'pipe', stderr: 'pipe',
-    })
-    void (async () => {
-      const code = await proc.exited
-      const out = await new Response(proc.stdout).text()
-      const err = await new Response(proc.stderr).text()
-      elog(`  bridge fallback request_id=${request_id} exit=${code} out=${out.trim()} err=${err.trim()}`)
+    execFile(PYTHON, [SEND_PY, BRIDGE_TARGET, tmp], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+      const code = error?.code ?? 0
+      elog(`  bridge fallback request_id=${request_id} exit=${code} out=${String(stdout).trim()} err=${String(stderr).trim()}`)
       try { rmSync(tmp) } catch {}
-    })()
+    })
   } catch (e) {
     elog(`  bridge fallback FAILED request_id=${request_id}: ${e}`)
   }
@@ -144,7 +140,10 @@ function trackSentMsg(chatId: number, messageId: number): void {
   if (!botSentMsgIds.has(chatId)) botSentMsgIds.set(chatId, new Set())
   const s = botSentMsgIds.get(chatId)!
   s.add(messageId)
-  if (s.size > 200) s.delete(s.values().next().value)
+  if (s.size > 200) {
+    const oldest = s.values().next().value
+    if (oldest !== undefined) s.delete(oldest)
+  }
 }
 function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): boolean {
   if (!replyToMsgId) return false
@@ -357,11 +356,12 @@ bot.on('business_message', async ctx => {
 
   // Fetch connection info (once per connId) to log can_reply for diagnostics
   void bot.api.getBusinessConnection(connId).then(bc => {
-    elog(`  getBusinessConnection can_reply=${bc.can_reply} is_enabled=${bc.is_enabled} user=${bc.user?.id}`)
+    const b = bc as unknown as { can_reply?: boolean; rights?: unknown; is_enabled?: boolean; user?: { id?: number } }
+    elog(`  getBusinessConnection can_reply=${b.can_reply ?? JSON.stringify(b.rights)} is_enabled=${b.is_enabled} user=${b.user?.id}`)
   }).catch(e => elog(`  getBusinessConnection failed: ${e}`))
 
   // Ignore messages FROM bots or IN chats WITH bots (prevents infinite loop
-  // where our bridge reply in @claudemagday_bot triggers another business_message).
+  // where our bridge reply in the bridge bot triggers another business_message).
   if (msg.from?.is_bot) { elog('  business_message: from bot, skipping'); return }
   // Also skip if the chat is with a bot (username ends with 'bot', case-insensitive,
   // or chat type is not 'private'). Business bots cannot reply to bot chats anyway
@@ -444,8 +444,8 @@ bot.on('business_message', async ctx => {
 
 // Log business_connection updates (to see can_reply flag)
 bot.on('business_connection', async ctx => {
-  const bc = ctx.update.business_connection
-  elog(`business_connection id=${bc?.id} user=${bc?.user?.id} can_reply=${bc?.can_reply} is_enabled=${bc?.is_enabled}`)
+  const bc = ctx.update.business_connection as unknown as { id?: string; user?: { id?: number }; can_reply?: boolean; rights?: unknown; is_enabled?: boolean }
+  elog(`business_connection id=${bc?.id} user=${bc?.user?.id} can_reply=${bc?.can_reply ?? JSON.stringify(bc?.rights)} is_enabled=${bc?.is_enabled}`)
 })
 
 // swallow taps on the placeholder's "⏳ думаю…" button

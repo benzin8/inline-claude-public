@@ -1,5 +1,10 @@
 node_modules/
+dist/
 .env
 bot.pid
 events.log
-ic_*.txt
+ic_*
+chat_history.db
+chat_history.db-*
+tmp/
+bun.lock
