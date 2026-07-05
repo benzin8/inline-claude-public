@@ -190,13 +190,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let text = String(args.text ?? '')
       const p = bizPending.get(biz_request_id)
       if (!p) throw new Error(`unknown or expired biz_request_id: ${biz_request_id}`)
-      if (text.length > 4096) text = text.slice(0, 4090) + '…'
+      // Prepend animated Claude emoji before the answer
+      const bizEmoji = '<tg-emoji emoji-id="5368635272332352173">🎉</tg-emoji> '
+      const escHtmlBiz = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const bizText = bizEmoji + escHtmlBiz(text)
+      if (bizText.length > 4096) text = bizEmoji + escHtmlBiz(text).slice(0, 4090) + '…'
+      else text = bizText
       // grammY's typed sendMessage may not pass business_connection_id correctly;
       // use the raw method to guarantee the parameter reaches the Bot API.
       await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<unknown> } }).raw.sendMessage({
         business_connection_id: p.businessConnectionId,
         chat_id: p.chatId,
         text,
+        parse_mode: 'HTML',
       })
       bizPending.delete(biz_request_id)
       elog(`business_reply OK biz_request_id=${biz_request_id} len=${text.length}`)
