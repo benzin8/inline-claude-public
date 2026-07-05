@@ -206,7 +206,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const bizText = bizEmoji + escHtmlBiz(text)
       if (bizText.length > 4096) text = bizEmoji + escHtmlBiz(text).slice(0, 4090) + '…'
       else text = bizText
-      const replyParams = replyTo ? { reply_parameters: { message_id: p.messageId } } : {}
+      const replyParams = { reply_parameters: { message_id: p.messageId } }
       if (photoPath) {
         const { InputFile } = await import('grammy')
         await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<unknown>)(
