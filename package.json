@@ -1,0 +1,12 @@
+{
+  "name": "inline-claude",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "bun run server.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "grammy": "^1.30.0",
+    "zod": "^3.23.0"
+  }
+}

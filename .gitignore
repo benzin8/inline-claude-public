@@ -1,0 +1,5 @@
+node_modules/
+.env
+bot.pid
+events.log
+ic_*.txt
