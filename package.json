@@ -1,9 +1,24 @@
 {
   "name": "inline-claude",
   "version": "1.0.0",
-  "private": true,
+  "description": "Telegram inline + Business Bot MCP server for Claude Code",
   "type": "module",
-  "scripts": { "start": "bun run server.ts" },
+  "bin": {
+    "inline-claude": "./cli.ts"
+  },
+  "scripts": {
+    "start": "bun run server.ts",
+    "setup": "bun run cli.ts setup"
+  },
+  "keywords": ["telegram", "claude", "mcp", "bot", "business-bot", "inline-bot"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benzin8/inline-claude-public.git"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "grammy": "^1.30.0",
