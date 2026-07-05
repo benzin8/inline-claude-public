@@ -136,8 +136,8 @@ const mcp = new Server(
   },
 )
 
-// business request_id -> { businessConnectionId, chatId, query, ts }
-const bizPending = new Map<string, { businessConnectionId: string; chatId: number; query: string; ts: number }>()
+// business request_id -> { businessConnectionId, chatId, messageId, query, ts }
+const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number }>()
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -157,12 +157,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'business_reply',
       description:
-        'Reply to a Business Bot message — sends a NEW message into the private chat where the owner received a message, using the owner\'s Business Bot connection. Pass the biz_request_id from the [[biz:...]] bridge trigger and your answer text.',
+        'Reply to a Business Bot message — sends a NEW message into the private chat where the owner received a message, using the owner\'s Business Bot connection. Pass the biz_request_id from the [[biz:...]] bridge trigger and your answer text. Optionally attach a photo (absolute file path) or reply directly to the triggering message.',
       inputSchema: {
         type: 'object',
         properties: {
           biz_request_id: { type: 'string', description: 'biz_request_id from the [[biz:...]] bridge trigger' },
-          text: { type: 'string', description: 'the reply text (max ~4096 chars)' },
+          text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path is set' },
+          photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
+          reply_to: { type: 'boolean', description: 'if true, reply directly to the triggering message (quote-reply)' },
         },
         required: ['biz_request_id', 'text'],
       },
@@ -195,26 +197,35 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     if (req.params.name === 'business_reply') {
       const biz_request_id = String(args.biz_request_id)
       let text = String(args.text ?? '')
+      const photoPath = args.photo_path ? String(args.photo_path) : undefined
+      const replyTo = Boolean(args.reply_to)
       const p = bizPending.get(biz_request_id)
       if (!p) throw new Error(`unknown or expired biz_request_id: ${biz_request_id}`)
-      // Prepend animated Claude emoji before the answer
       const bizEmoji = '<tg-emoji emoji-id="5368635272332352173">🎉</tg-emoji> '
       const escHtmlBiz = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       const bizText = bizEmoji + escHtmlBiz(text)
       if (bizText.length > 4096) text = bizEmoji + escHtmlBiz(text).slice(0, 4090) + '…'
       else text = bizText
-      // grammY's typed sendMessage may not pass business_connection_id correctly;
-      // use the raw method to guarantee the parameter reaches the Bot API.
-      await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<unknown> } }).raw.sendMessage({
-        business_connection_id: p.businessConnectionId,
-        chat_id: p.chatId,
-        text,
-        parse_mode: 'HTML',
-      })
+      const replyParams = replyTo ? { reply_parameters: { message_id: p.messageId } } : {}
+      if (photoPath) {
+        const { InputFile } = await import('grammy')
+        await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<unknown>)(
+          p.chatId,
+          new InputFile(photoPath),
+          { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams },
+        )
+      } else {
+        await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<unknown> } }).raw.sendMessage({
+          business_connection_id: p.businessConnectionId,
+          chat_id: p.chatId,
+          text,
+          parse_mode: 'HTML',
+          ...replyParams,
+        })
+      }
       bizPending.delete(biz_request_id)
-      // Save Claude's reply to history (raw text, before emoji formatting)
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
-      elog(`business_reply OK biz_request_id=${biz_request_id} len=${text.length}`)
+      elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in business chat (request ${biz_request_id})` }] }
     }
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
@@ -359,7 +370,7 @@ bot.on('business_message', async ctx => {
   // Strip the bot mention to get the clean question
   const query = text.replace(/@claude_inline_bot/gi, '').trim() || text.trim()
   const biz_request_id = newId()
-  bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, query, ts: Date.now() })
+  bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, messageId: msg.message_id, query, ts: Date.now() })
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
 
   // Download photo if present (e.g. "Клод, что на фото?" with attached image)
