@@ -28,6 +28,16 @@ function elog(msg: string): void {
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`) } catch {}
 }
 
+// Load ./.env into process.env (real env wins). MUST run before any
+// process.env.* reads below (BRIDGE_TARGET/PYTHON/TOKEN/OWNER_ID) — otherwise
+// those consts capture undefined before the file is loaded.
+try {
+  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+    const m = line.match(/^\s*(\w+)\s*=\s*(.*)$/)
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].trim()
+  }
+} catch {}
+
 // --- FALLBACK delivery via the working bridge channel ---
 // The harness does NOT surface this 2nd MCP server's claude/channel
 // notifications into the session, so inline questions never arrive that way.
@@ -62,14 +72,6 @@ function deliverViaBridge(request_id: string, query: string, tag: string, histor
     elog(`  bridge fallback FAILED request_id=${request_id}: ${e}`)
   }
 }
-
-// Load ./.env into process.env (real env wins).
-try {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const m = line.match(/^\s*(\w+)\s*=\s*(.*)$/)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].trim()
-  }
-} catch {}
 
 const TOKEN = process.env.INLINE_BOT_TOKEN
 const OWNER_ID = process.env.OWNER_ID // owner's telegram user id, as string
