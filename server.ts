@@ -362,11 +362,30 @@ bot.on('business_message', async ctx => {
   bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, query, ts: Date.now() })
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
 
+  // Download photo if present (e.g. "Клод, что на фото?" with attached image)
+  let photoPath: string | undefined
+  const photo = (msg as unknown as { photo?: Array<{ file_id: string }> }).photo?.at(-1)
+  if (photo) {
+    try {
+      mkdirSync(join(HERE, 'tmp'), { recursive: true })
+      const fileInfo = await bot.api.getFile(photo.file_id)
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+      const resp = await fetch(url)
+      const buf = await resp.arrayBuffer()
+      photoPath = join(HERE, 'tmp', `biz_photo_${biz_request_id}.jpg`)
+      writeFileSync(photoPath, Buffer.from(buf))
+      elog(`  photo saved: ${photoPath}`)
+    } catch (e) {
+      elog(`  photo download failed: ${e}`)
+    }
+  }
+
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
     ? `role=owner biz_chat=${chatId}`
     : `role=guest who=${msg.from?.username ?? '?'}:${fromId} biz_chat=${chatId}`
-  deliverViaBridge(`biz:${biz_request_id}`, query, senderTag)
+  const queryWithPhoto = photoPath ? `${query} [PHOTO:${photoPath}]` : query
+  deliverViaBridge(`biz:${biz_request_id}`, queryWithPhoto, senderTag)
 })
 
 // Log business_connection updates (to see can_reply flag)
