@@ -139,6 +139,19 @@ const mcp = new Server(
 // business request_id -> { businessConnectionId, chatId, messageId, query, ts }
 const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number }>()
 
+// chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
+const botSentMsgIds = new Map<number, Set<number>>()
+function trackSentMsg(chatId: number, messageId: number): void {
+  if (!botSentMsgIds.has(chatId)) botSentMsgIds.set(chatId, new Set())
+  const s = botSentMsgIds.get(chatId)!
+  s.add(messageId)
+  if (s.size > 200) s.delete(s.values().next().value)
+}
+function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): boolean {
+  if (!replyToMsgId) return false
+  return botSentMsgIds.get(chatId)?.has(replyToMsgId) ?? false
+}
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -207,22 +220,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (bizText.length > 4096) text = bizEmoji + escHtmlBiz(text).slice(0, 4090) + '…'
       else text = bizText
       const replyParams = { reply_parameters: { message_id: p.messageId } }
+      let sentMsgId: number | undefined
       if (photoPath) {
         const { InputFile } = await import('grammy')
-        await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<unknown>)(
+        const sent = await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<{ message_id: number }>)(
           p.chatId,
           new InputFile(photoPath),
           { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams },
         )
+        sentMsgId = sent?.message_id
       } else {
-        await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<unknown> } }).raw.sendMessage({
+        const sent = await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
           business_connection_id: p.businessConnectionId,
           chat_id: p.chatId,
           text,
           parse_mode: 'HTML',
           ...replyParams,
         })
+        sentMsgId = sent?.message_id
       }
+      if (sentMsgId) trackSentMsg(p.chatId, sentMsgId)
       bizPending.delete(biz_request_id)
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
       elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} len=${text.length}`)
@@ -360,9 +377,11 @@ bot.on('business_message', async ctx => {
   const chatIdStr = String(chatId)
   if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
 
-  // Only act if the message mentions @claude_inline_bot (case-insensitive)
+  // Trigger if: message mentions the bot/клод, OR is a reply to one of our messages
   const lower = text.toLowerCase()
-  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ')) {
+  const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
+  const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
+  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs) {
     elog('  business_message: no trigger, skipping')
     return
   }
