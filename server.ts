@@ -37,7 +37,7 @@ function elog(msg: string): void {
 const PYTHON = 'C:\\Python314\\python.exe'
 const USERBOT_DIR = join(homedir(), '.claude', 'userbot')
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
-const BRIDGE_TARGET = '@claudemagday_bot'
+const BRIDGE_TARGET = process.env.BRIDGE_TARGET ?? ''
 function deliverViaBridge(request_id: string, query: string, tag: string, historyBlock?: string): void {
   try {
     const tmp = join(HERE, `ic_${request_id}.txt`)
@@ -79,10 +79,9 @@ const TOKEN = process.env.INLINE_BOT_TOKEN
 const OWNER_ID = process.env.OWNER_ID // owner's telegram user id, as string
 
 // Who may USE the inline bot. OWNER_ID is always allowed; extra ids can be
-// granted (this is only Q&A access — routing still goes via дима's userbot —
-// NOT operator access to the machine like the bridge allowlist).
-//   961994635 = Ерофей (@programmer2203), дима's friend (added 2026-07-05)
-const EXTRA_ALLOWED = ['961994635']
+// granted via INLINE_ALLOW_IDS env var (comma-separated telegram user ids).
+// This is Q&A access only — NOT operator access to the machine.
+const EXTRA_ALLOWED: string[] = []
 const ALLOWED_IDS = new Set(
   [OWNER_ID, ...EXTRA_ALLOWED, ...String(process.env.INLINE_ALLOW_IDS ?? '').split(',')]
     .map(s => String(s ?? '').trim())
@@ -92,7 +91,7 @@ const ALLOWED_IDS = new Set(
 if (!TOKEN) {
   process.stderr.write(
     `inline-claude: INLINE_BOT_TOKEN required in ${ENV_FILE}\n` +
-    `  format: INLINE_BOT_TOKEN=123456:AA...\n  OWNER_ID=1061015676\n`,
+    `  format: INLINE_BOT_TOKEN=123456:AA...\n  OWNER_ID=<your_telegram_id>\n`,
   )
   process.exit(1)
 }
