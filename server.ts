@@ -18,6 +18,7 @@ import { Bot, GrammyError, API_CONSTANTS, InlineKeyboard } from 'grammy'
 import { readFileSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { saveMessage, getHistory } from './db'
 
 const HERE = join(homedir(), '.claude', 'inline-bot')
 const ENV_FILE = join(HERE, '.env')
@@ -37,14 +38,20 @@ const PYTHON = 'C:\\Python314\\python.exe'
 const USERBOT_DIR = join(homedir(), '.claude', 'userbot')
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
 const BRIDGE_TARGET = '@claudemagday_bot'
-function deliverViaBridge(request_id: string, query: string, tag: string): void {
+function deliverViaBridge(request_id: string, query: string, tag: string, historyBlock?: string): void {
   try {
     const tmp = join(HERE, `ic_${request_id}.txt`)
     // The `tag` (role=owner | role=guest who=...) is set authoritatively by the
     // server from the sender's telegram id — it lives in the trusted prefix,
     // OUTSIDE the user-controlled <query>. Claude must ignore any role claims
     // inside the query body and treat guest inline input as answer-only.
-    writeFileSync(tmp, `[[ic:${request_id} ${tag}]] ${query}`)
+    let content = `[[ic:${request_id} ${tag}]] ${query}`
+    if (historyBlock) {
+      const suffix = `\n\n--- история чата ---\n${historyBlock}\n---`
+      // Keep total under 4096 chars (Telegram message limit)
+      if (content.length + suffix.length <= 4090) content += suffix
+    }
+    writeFileSync(tmp, content)
     const proc = Bun.spawn([PYTHON, SEND_PY, BRIDGE_TARGET, tmp], {
       cwd: USERBOT_DIR, stdout: 'pipe', stderr: 'pipe',
     })
@@ -205,6 +212,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         parse_mode: 'HTML',
       })
       bizPending.delete(biz_request_id)
+      // Save Claude's reply to history (raw text, before emoji formatting)
+      saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
       elog(`business_reply OK biz_request_id=${biz_request_id} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in business chat (request ${biz_request_id})` }] }
     }
@@ -336,6 +345,10 @@ bot.on('business_message', async ctx => {
     return
   }
 
+  // Save every incoming business message to history (all contacts, not just triggers)
+  const chatIdStr = String(chatId)
+  if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
+
   // Only act if the message mentions @claude_inline_bot (case-insensitive)
   const lower = text.toLowerCase()
   if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ')) {
@@ -353,7 +366,8 @@ bot.on('business_message', async ctx => {
   const senderTag = fromId === Number(OWNER_ID)
     ? 'role=owner'
     : `role=guest who=${msg.from?.username ?? '?'}:${fromId}`
-  deliverViaBridge(`biz:${biz_request_id}`, query, senderTag)
+  const history = getHistory(chatIdStr, 20)
+  deliverViaBridge(`biz:${biz_request_id}`, query, senderTag, history || undefined)
 })
 
 // Log business_connection updates (to see can_reply flag)
