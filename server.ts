@@ -364,8 +364,8 @@ bot.on('business_message', async ctx => {
 
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
-    ? 'role=owner'
-    : `role=guest who=${msg.from?.username ?? '?'}:${fromId}`
+    ? `role=owner biz_chat=${chatId}`
+    : `role=guest who=${msg.from?.username ?? '?'}:${fromId} biz_chat=${chatId}`
   deliverViaBridge(`biz:${biz_request_id}`, query, senderTag)
 })
 
