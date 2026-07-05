@@ -391,12 +391,32 @@ bot.on('business_message', async ctx => {
     }
   }
 
+  // Download voice message if present
+  let voicePath: string | undefined
+  const voice = (msg as unknown as { voice?: { file_id: string } }).voice
+  if (voice) {
+    try {
+      mkdirSync(join(HERE, 'tmp'), { recursive: true })
+      const fileInfo = await bot.api.getFile(voice.file_id)
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+      const resp = await fetch(url)
+      const buf = await resp.arrayBuffer()
+      voicePath = join(HERE, 'tmp', `biz_voice_${biz_request_id}.oga`)
+      writeFileSync(voicePath, Buffer.from(buf))
+      elog(`  voice saved: ${voicePath}`)
+    } catch (e) {
+      elog(`  voice download failed: ${e}`)
+    }
+  }
+
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
     ? `role=owner biz_chat=${chatId}`
     : `role=guest who=${msg.from?.username ?? '?'}:${fromId} biz_chat=${chatId}`
-  const queryWithPhoto = photoPath ? `${query} [PHOTO:${photoPath}]` : query
-  deliverViaBridge(`biz:${biz_request_id}`, queryWithPhoto, senderTag)
+  let queryFinal = query
+  if (photoPath) queryFinal += ` [PHOTO:${photoPath}]`
+  if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
+  deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
 })
 
 // Log business_connection updates (to see can_reply flag)
