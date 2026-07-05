@@ -13,6 +13,7 @@
     "README.ru.md",
     "SETUP.md",
     "AGENTS.md",
+    "LICENSE",
     ".env.example"
   ],
   "scripts": {

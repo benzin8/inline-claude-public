@@ -2,6 +2,11 @@
 
 [![English](https://img.shields.io/badge/lang-English-blue.svg)](README.md) [![Русский](https://img.shields.io/badge/lang-Русский-green.svg)](README.ru.md)
 
+[![npm version](https://img.shields.io/npm/v/inline-claude.svg)](https://www.npmjs.com/package/inline-claude)
+[![npm downloads](https://img.shields.io/npm/dm/inline-claude.svg)](https://www.npmjs.com/package/inline-claude)
+[![node](https://img.shields.io/node/v/inline-claude.svg)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/inline-claude.svg)](LICENSE)
+
 </div>
 
 # inline-claude
