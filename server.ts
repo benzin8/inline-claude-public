@@ -373,9 +373,14 @@ bot.on('business_message', async ctx => {
   bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, messageId: msg.message_id, query, ts: Date.now() })
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
 
-  // Download photo if present (e.g. "Клод, что на фото?" with attached image)
+  // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string } }
+  const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
+  const msgCast = msg as unknown as AnyMsg
+
+  // Download photo if present in the trigger message or in a replied-to message
   let photoPath: string | undefined
-  const photo = (msg as unknown as { photo?: Array<{ file_id: string }> }).photo?.at(-1)
+  const photo = msgCast.photo?.at(-1) ?? replyMsg?.photo?.at(-1)
   if (photo) {
     try {
       mkdirSync(join(HERE, 'tmp'), { recursive: true })
@@ -391,9 +396,9 @@ bot.on('business_message', async ctx => {
     }
   }
 
-  // Download voice message if present
+  // Download voice message if present in the trigger message or in a replied-to message
   let voicePath: string | undefined
-  const voice = (msg as unknown as { voice?: { file_id: string } }).voice
+  const voice = msgCast.voice ?? replyMsg?.voice
   if (voice) {
     try {
       mkdirSync(join(HERE, 'tmp'), { recursive: true })
