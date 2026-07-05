@@ -366,8 +366,7 @@ bot.on('business_message', async ctx => {
   const senderTag = fromId === Number(OWNER_ID)
     ? 'role=owner'
     : `role=guest who=${msg.from?.username ?? '?'}:${fromId}`
-  const history = getHistory(chatIdStr, 20)
-  deliverViaBridge(`biz:${biz_request_id}`, query, senderTag, history || undefined)
+  deliverViaBridge(`biz:${biz_request_id}`, query, senderTag)
 })
 
 // Log business_connection updates (to see can_reply flag)
