@@ -11,6 +11,7 @@
     "scripts",
     "README.md",
     "SETUP.md",
+    "AGENTS.md",
     ".env.example"
   ],
   "scripts": {
