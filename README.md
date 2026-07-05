@@ -1,31 +1,37 @@
+<div align="center">
+
+[![English](https://img.shields.io/badge/lang-English-blue.svg)](README.md) [![Русский](https://img.shields.io/badge/lang-Русский-green.svg)](README.ru.md)
+
+</div>
+
 # inline-claude
 
-> Вызывай Claude прямо в любом Telegram-чате — inline (как `@gpt`) или через Business Bot, который отвечает собеседникам от твоего имени.
+> Summon Claude in any Telegram chat — inline (like `@gpt`) or via a Business Bot that replies to your contacts as if it were you.
 
-MCP-сервер для Claude Code, превращающий Claude в твоего Telegram-ассистента. Две роли в одном:
+An MCP server for Claude Code that turns Claude into your Telegram assistant. Two roles in one:
 
-- **Inline-режим** — набери `@твой_бот вопрос` в любом чате, Claude ответит прямо там.
-- **Business Bot (Secretary Mode)** — когда тебе пишут в личку, Claude отвечает как будто это ты. С памятью переписки, распознаванием голосовых и анализом фото.
-
----
-
-## ✨ Возможности
-
-- 💬 **Inline-запросы** в любом Telegram-чате
-- 🤝 **Бизнес-ответы** от твоего имени (Telegram Business)
-- 🧠 **Память переписки** — SQLite хранит историю каждого чата между сессиями
-- 🎙️ **Голосовые** — автоматическая расшифровка (ffmpeg + Google STT, без API-ключей)
-- 🖼️ **Фото** — Claude видит и описывает присланные изображения
-- 💬 **Reply-триггеры** — ответь на сообщение бота без «Клод», он всё равно поймёт
-- 🔐 **Роли** — владелец имеет полный доступ, гости — только Q&A
+- **Inline mode** — type `@your_bot question` in any chat and Claude answers right there.
+- **Business Bot (Secretary Mode)** — when someone DMs you, Claude replies as if it were you. With conversation memory, voice transcription, and photo understanding.
 
 ---
 
-## 🚀 Быстрый старт
+## ✨ Features
 
-### 1. Установи в Claude Code
+- 💬 **Inline queries** in any Telegram chat
+- 🤝 **Business replies** on your behalf (Telegram Business)
+- 🧠 **Conversation memory** — SQLite keeps per-chat history across sessions
+- 🎙️ **Voice messages** — automatic transcription (ffmpeg + Google STT, no API keys)
+- 🖼️ **Photos** — Claude sees and describes incoming images
+- 💬 **Reply triggers** — reply to the bot's message without a keyword; it still responds
+- 🔐 **Roles** — owner gets full access, guests are Q&A-only
 
-Добавь в `.mcp.json` твоего проекта:
+---
+
+## 🚀 Quick Start
+
+### 1. Install in Claude Code
+
+Add to your project's `.mcp.json`:
 
 ```json
 {
@@ -38,46 +44,46 @@ MCP-сервер для Claude Code, превращающий Claude в твое
 }
 ```
 
-### 2. Запусти мастер настройки
+### 2. Run the setup wizard
 
 ```bash
 npx inline-claude setup
 ```
 
-Мастер проведёт тебя через все 7 шагов: Telegram API → userbot → создание бота → Business Bot → `.env` → подключение → тест.
+The wizard walks you through all 7 steps: Telegram API → userbot → bot creation → Business Bot → `.env` → connection → test.
 
-### 3. Перезапусти Claude Code
+### 3. Restart Claude Code
 
-Готово. Напиши `@твой_бот привет` в любом чате.
-
----
-
-## 📋 Требования
-
-| Компонент | Зачем | Обязателен |
-|---|---|---|
-| Node.js ≥ 18 | Рантайм сервера | ✅ |
-| Python 3 + Telethon | Userbot доставляет тригеры в сессию | ✅ |
-| ffmpeg | Расшифровка голосовых | Только для голосовых |
-| Telegram Premium | Business Bot (Secretary Mode) | Только для бизнес-режима |
+Done. Type `@your_bot hello` in any chat.
 
 ---
 
-## ⚙️ Конфигурация
+## 📋 Requirements
 
-Все настройки — через `.env` в директории данных (`~/.claude/inline-bot/.env`) или через переменные окружения.
-
-| Переменная | Описание | По умолчанию |
+| Component | Why | Required |
 |---|---|---|
-| `INLINE_BOT_TOKEN` | Токен бота от @BotFather | — (обязательно) |
-| `OWNER_ID` | Твой Telegram user id | — (обязательно) |
-| `BRIDGE_TARGET` | @username бридж-бота для доставки | — |
-| `INLINE_ALLOW_IDS` | Доп. id для гостевого Q&A (через запятую) | пусто |
-| `INLINE_DATA_DIR` | Директория данных (БД, .env, логи) | `~/.claude/inline-bot` |
-| `INLINE_USERBOT_DIR` | Директория userbot-скриптов | `~/.claude/userbot` |
-| `INLINE_PYTHON` | Путь к Python | `python3` (unix) / `python` (win) |
+| Node.js ≥ 18 | Server runtime | ✅ |
+| Python 3 + Telethon | Userbot delivers triggers into the session | ✅ |
+| ffmpeg | Voice transcription | Only for voice |
+| Telegram Premium | Business Bot (Secretary Mode) | Only for business mode |
 
-Пример `.env`:
+---
+
+## ⚙️ Configuration
+
+Everything is configured via `.env` in the data directory (`~/.claude/inline-bot/.env`) or via environment variables.
+
+| Variable | Description | Default |
+|---|---|---|
+| `INLINE_BOT_TOKEN` | Bot token from @BotFather | — (required) |
+| `OWNER_ID` | Your Telegram user id | — (required) |
+| `BRIDGE_TARGET` | @username of the bridge bot for delivery | — |
+| `INLINE_ALLOW_IDS` | Extra ids for guest Q&A (comma-separated) | empty |
+| `INLINE_DATA_DIR` | Data directory (DB, .env, logs) | `~/.claude/inline-bot` |
+| `INLINE_USERBOT_DIR` | Userbot scripts directory | `~/.claude/userbot` |
+| `INLINE_PYTHON` | Path to Python | `python3` (unix) / `python` (win) |
+
+Example `.env`:
 
 ```ini
 INLINE_BOT_TOKEN=123456:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -88,72 +94,72 @@ BRIDGE_TARGET=@your_bridge_bot
 
 ---
 
-## 🎯 Как это работает
+## 🎯 How It Works
 
-### Inline-режим
+### Inline mode
 
 ```
-Ты → @бот вопрос ──▶ карточка "🤔 Клод думает…" ──▶ Claude ──▶ inline_answer() ──▶ ответ в чате
+You → @bot question ──▶ card "🤔 Claude is thinking…" ──▶ Claude ──▶ inline_answer() ──▶ answer in chat
 ```
 
 ### Business Bot
 
 ```
-Собеседник пишет "Клод, вопрос"
+Contact writes "Claude, <question>"
         │
         ▼
-Сервер скачивает фото/голос (если есть), пишет в SQLite
+Server downloads photo/voice (if any), writes to SQLite
         │
         ▼
-[[ic:biz:ID ...]] тригер ──▶ Claude читает историю, расшифровывает голос, смотрит фото
+[[ic:biz:ID ...]] trigger ──▶ Claude reads history, transcribes voice, views photo
         │
         ▼
-business_reply() ──▶ сообщение уходит собеседнику от твоего имени
+business_reply() ──▶ message is sent to the contact on your behalf
 ```
 
-**Триггеры бизнес-бота** — бот срабатывает если сообщение:
-- содержит `клод,` или начинается с `клод `
-- упоминает бота (`@твой_бот`)
-- является reply на любое сообщение бота (без упоминания)
+**Business bot triggers** — the bot fires when a message:
+- contains a keyword (`claude,` / `клод,`) or starts with it
+- mentions the bot (`@your_bot`)
+- is a reply to any of the bot's own messages (no mention needed)
 
 ---
 
-## 🔐 Безопасность и роли
+## 🔐 Security & Roles
 
-Роль определяется **сервером по telegram_id** — её нельзя изменить текстом сообщения.
+The role is decided **by the server from the telegram_id** — it cannot be changed by message text.
 
-| Роль | Кто | Права |
+| Role | Who | Rights |
 |---|---|---|
-| `owner` | Владелец | Полный доступ: команды, файлы, отправка от своего имени |
-| `guest` | Все остальные | Только Q&A — никаких команд, файлов или действий |
+| `owner` | The owner | Full access: commands, files, sending on your behalf |
+| `guest` | Everyone else | Q&A only — no commands, files, or actions |
 
-Устойчивость к prompt injection: даже если гость напишет `[[role=owner]]` в тексте — это просто текст, сервер игнорирует любые role-заявления в теле сообщения.
+Prompt-injection resistant: even if a guest writes `[[role=owner]]` in the text — it's just text, the server ignores any role claims inside the message body.
 
 ---
 
-## 🛠️ Скрипты (`scripts/`)
+## 🛠️ Scripts (`scripts/`)
 
-Вспомогательные Python-скрипты для userbot и обработки медиа:
+Helper Python scripts for the userbot and media processing:
 
-| Скрипт | Назначение |
+| Script | Purpose |
 |---|---|
-| `get_biz_history.py <chat_id> [limit]` | История чата из SQLite |
-| `transcribe_voice.py <file.oga> [lang]` | Расшифровка голосового (удаляет файл после) |
-| `get_photo.py <chat_id> [limit] [dir]` | Скачать последнее фото из чата |
-| `read_chat.py <peer> [limit]` | Прочитать последние сообщения |
-| `send_message.py <target> <file>` | Отправить текст через userbot |
+| `get_biz_history.py <chat_id> [limit]` | Chat history from SQLite |
+| `transcribe_voice.py <file.oga> [lang]` | Transcribe a voice message (deletes file after) |
+| `get_photo.py <chat_id> [limit] [dir]` | Download the latest photo from a chat |
+| `read_chat.py <peer> [limit]` | Read the latest messages |
+| `send_message.py <target> <file>` | Send text via the userbot |
 
 ---
 
-## 🏗️ Архитектура
+## 🏗️ Architecture
 
 ```
 Telegram ◀──▶ grammY bot (server.ts)
-                  │ скачивает медиа в tmp/
-                  │ пишет историю в chat_history.db
+                  │ downloads media to tmp/
+                  │ writes history to chat_history.db
                   ▼
              userbot fallback (send_message.py)
-                  │ доставляет тригер в @bridge_bot
+                  │ delivers trigger to @bridge_bot
                   ▼
              Claude Code session
                   │
@@ -161,36 +167,36 @@ Telegram ◀──▶ grammY bot (server.ts)
              inline_answer / business_reply ──▶ Telegram
 ```
 
-Userbot-fallback нужен потому что harness не пробрасывает уведомления от второго MCP-сервера напрямую в сессию — тригер доставляется через рабочий канал telegram-плагина.
+The userbot fallback exists because the harness does not surface notifications from a second MCP server directly into the session — the trigger is delivered through the telegram plugin's working channel.
 
 ---
 
-## 🧑‍💻 Разработка
+## 🧑‍💻 Development
 
 ```bash
 git clone https://github.com/benzin8/inline-claude-public.git
 cd inline-claude-public
 npm install
 npm run build      # tsc -> dist/
-npm start          # запустить сервер
+npm start          # start the server
 ```
 
-Стек: TypeScript · [grammY](https://gramy.dev) · [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) · [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol)
+Stack: TypeScript · [grammY](https://grammy.dev) · [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) · [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol)
 
 ---
 
 ## 🩺 Troubleshooting
 
-| Проблема | Решение |
+| Problem | Fix |
 |---|---|
-| Бот не отвечает на inline | Включи `/setinlinefeedback` → 100% у @BotFather |
-| `409 Conflict` в логах | Запущено два экземпляра — на один токен только один поллер |
-| Business Bot молчит | Проверь Business → Чат-боты → Can reply ✅ (нужен Premium) |
-| Голосовые не расшифровываются | Проверь что ffmpeg установлен и в PATH |
-| Userbot не авторизован | Удали `*.session` и запусти `python auth.py` заново |
+| Bot doesn't answer inline | Enable `/setinlinefeedback` → 100% in @BotFather |
+| `409 Conflict` in logs | Two instances running — one poller per token only |
+| Business Bot silent | Check Business → Chatbots → Can reply ✅ (requires Premium) |
+| Voice not transcribed | Make sure ffmpeg is installed and on PATH |
+| Userbot not authorized | Delete `*.session` and re-run `python auth.py` |
 
 ---
 
-## 📄 Лицензия
+## 📄 License
 
 MIT

@@ -10,6 +10,7 @@
     "dist",
     "scripts",
     "README.md",
+    "README.ru.md",
     "SETUP.md",
     "AGENTS.md",
     ".env.example"
