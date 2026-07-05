@@ -1,6 +1,6 @@
 {
   "name": "inline-claude",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Telegram inline + Business Bot MCP server for Claude Code",
   "type": "module",
   "bin": {
