@@ -4,7 +4,7 @@
   "description": "Telegram inline + Business Bot MCP server for Claude Code",
   "type": "module",
   "bin": {
-    "inline-claude": "./dist/cli.js"
+    "inline-claude": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -25,7 +25,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/benzin8/inline-claude-public.git"
+    "url": "git+https://github.com/benzin8/inline-claude-public.git"
+  },
+  "homepage": "https://github.com/benzin8/inline-claude-public#readme",
+  "bugs": {
+    "url": "https://github.com/benzin8/inline-claude-public/issues"
   },
   "engines": {
     "node": ">=18"
