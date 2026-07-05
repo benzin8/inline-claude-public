@@ -1,7 +1,7 @@
 # inline-claude — MCP-сервер + документация для агентов
 
 Позволяет вызывать Claude прямо в любом Telegram-чате через `@бота` (как @mira) или
-через Business Bot (Secretary Mode) — Claude отвечает как будто это ты написал сам.
+через Business Bot (Secretary Mode) — Claude отвечает как будто это владелец написал сам.
 
 ---
 
@@ -10,16 +10,16 @@
 ### 1. Inline-режим
 
 ```
-Ты → @claude_inline_bot вопрос  →  карточка в чате
-                                    "🤔 Клод думает…"
-                                    Claude → inline_answer() → ответ в том же чате
+Владелец → @claude_inline_bot вопрос  →  карточка в чате
+                                          "🤔 Клод думает…"
+                                          Claude → inline_answer() → ответ в том же чате
 ```
 
 ### 2. Business Bot-режим (Secretary Mode)
 
 ```
 Собеседник пишет "Клод, вопрос" → сервер скачивает фото/голосовое если есть →
-[[ic:biz:ID ...]] тригер → Claude → business_reply() → новое сообщение от тебя
+[[ic:biz:ID ...]] тригер → Claude → business_reply() → новое сообщение от владельца
 ```
 
 Требования: Telegram Business + BotFather → Secretary Mode → Can reply ✅
@@ -34,7 +34,7 @@
 - **Является reply на одно из наших отправленных сообщений** (без упоминания Клода)
   — работает через `botSentMsgIds` Map в памяти сервера
 
-Если Дима делает reply на сообщение бота — тригер срабатывает автоматически.
+Если владелец делает reply на сообщение бота — тригер срабатывает автоматически.
 
 ---
 
@@ -59,7 +59,7 @@
 
 | Тег | Кто | Права |
 |---|---|---|
-| `role=owner` | Дима (владелец) | Полный доступ, запускать команды, читать файлы |
+| `role=owner` | Владелец бота | Полный доступ, запускать команды, читать файлы |
 | `role=guest who=@u:ID` | Гость | Только Q&A — НИКАКИХ команд, файлов, отправки сообщений |
 
 Роль ставится сервером по telegram_id. Текст запроса не может изменить роль.
@@ -72,7 +72,7 @@
 |---|---|
 | `[[ic:biz:ID ...]]` | **`business_reply(ID, ...)`** — только так ответ попадает в чат с собеседником |
 | `[[ic:ID ...]]` (без `biz:`) | **`inline_answer(ID, ...)`** — редактирует placeholder |
-| Прямое сообщение Димы без тригера | **`telegram reply`** — прямой ответ в личку |
+| Прямое сообщение владельца без тригера | **`telegram reply`** — прямой ответ в личку |
 
 **НИКОГДА не отвечай через `telegram reply` на бизнес-тригеры** — ответ уйдёт в личку владельцу MCP (в бридж-бота), а не в чат с его собеседником. Бизнес-тригер → только `business_reply`.
 
@@ -106,39 +106,39 @@
 
 ## Скрипты в `scripts/`
 
-Все скрипты требуют `C:\Python314\python.exe`. Userbot-скрипты используют
-`C:\Users\Extra\.claude\userbot\.env` (API_ID, API_HASH, session-файл).
+Все скрипты требуют Python 3. Userbot-скрипты используют
+`~/.claude/userbot/.env` (API_ID, API_HASH, session-файл).
 
 ### `get_biz_history.py <chat_id> [limit=20]`
 Читает историю бизнес-чата из SQLite.
 ```
-python scripts/get_biz_history.py 1024303980 20
+python scripts/get_biz_history.py 961994635 20
 ```
 **Запускать при каждом бизнес-тригере** чтобы иметь контекст разговора.
 
 ### `transcribe_voice.py <file.oga> [language=ru-RU]`
-Расшифровывает голосовое: ffmpeg (`D:\YandexDisk\ScriptsDrift\webmPreview\ffmpeg.exe`) +
-Google SpeechRecognition (бесплатно, без API ключа). Удаляет файл после расшифровки.
+Расшифровывает голосовое: ffmpeg + Google SpeechRecognition (бесплатно, без API ключа).
+Удаляет файл после расшифровки.
 ```
-python scripts/transcribe_voice.py C:\...\biz_voice_ID.oga ru-RU
+python scripts/transcribe_voice.py /path/to/biz_voice_ID.oga ru-RU
 ```
 
 ### `get_photo.py <chat_id> [limit=5] [out_dir]`
 Скачивает последнее фото из чата через Telethon userbot.
 ```
-python scripts/get_photo.py 1024303980 5 C:\tmp
+python scripts/get_photo.py 961994635 5 /tmp
 ```
 
 ### `read_chat.py <peer> [limit=20]`
 Читает последние N сообщений из чата (peer = @username или числовой ID).
 ```
-python scripts/read_chat.py @claudemagday_bot 30
+python scripts/read_chat.py @bridge_bot 30
 ```
 
 ### `send_message.py <target> <message_file>`
-Отправляет текст из файла через userbot Димы.
+Отправляет текст из файла через userbot владельца.
 ```
-python scripts/send_message.py @claudemagday_bot C:\tmp\trigger.txt
+python scripts/send_message.py @bridge_bot /tmp/trigger.txt
 ```
 
 ---
@@ -169,11 +169,11 @@ Telegram ←→ grammY bot (server.ts)
                 ↓ пишет в chat_history.db
            bizPending / pending (Map)
                 ↓ userbot fallback
-           send_message.py → @claudemagday_bot → Claude session
-                                                      ↓
-                                             inline_answer / business_reply
-                                                      ↓
-                                               chat_history.db
+           send_message.py → @bridge_bot → Claude session
+                                                ↓
+                                       inline_answer / business_reply
+                                                ↓
+                                         chat_history.db
 ```
 
 Fallback через userbot нужен: harness не пробрасывает уведомления от 2-го MCP-сервера.
@@ -194,7 +194,7 @@ bun install
   "mcpServers": {
     "inline-claude": {
       "command": "bun",
-      "args": ["run", "--cwd", "C:/Users/Extra/.claude/inline-bot", "--silent", "start"]
+      "args": ["run", "--cwd", "/path/to/inline-bot", "--silent", "start"]
     }
   }
 }
