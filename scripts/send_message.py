@@ -23,11 +23,19 @@ target = sys.argv[1]
 text = Path(sys.argv[2]).read_text(encoding="utf-8").strip()
 
 async def resolve(client, target):
+    # Guard: never resolve an empty/blank target — an empty substring would
+    # match the FIRST dialog and spam a random chat.
+    if not target or not target.strip():
+        return None
     try:
         return await client.get_entity(target)
     except Exception:
         pass
-    t = target.lower()
+    # Substring fallback only for reasonably specific targets (avoid 1-2 char
+    # strings matching unrelated dialogs).
+    t = target.strip().lower()
+    if len(t) < 3:
+        return None
     async for d in client.iter_dialogs():
         if t in (d.name or "").lower():
             return d.entity
