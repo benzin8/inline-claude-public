@@ -172,11 +172,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const p = pending.get(request_id)
       if (!p) throw new Error(`unknown or expired request_id: ${request_id}`)
       // Prepend the original question so readers see both Q and A in one message.
-      const formatted = `❓ ${p.query}\n\n🤖 ${text}`
+      const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const claudeEmoji = '<tg-emoji emoji-id="5368808376694248152">💬</tg-emoji>'
+      const formatted = `<b>Вопрос:</b> ${escHtml(p.query)}\n\n${claudeEmoji} ${escHtml(text)}`
       const final = formatted.length > 4096 ? formatted.slice(0, 4090) + '…' : formatted
       // pass an empty keyboard to drop the "⏳ думаю…" button on the answer
       await bot.api.editMessageTextInline(p.inlineMessageId, final, {
         reply_markup: { inline_keyboard: [] },
+        parse_mode: 'HTML',
       })
       pending.delete(request_id)
       elog(`inline_answer OK request_id=${request_id} len=${final.length}`)
