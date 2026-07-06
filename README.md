@@ -25,6 +25,7 @@ An MCP server for Claude Code that turns Claude into your Telegram assistant. Tw
 - 💬 **Inline queries** in any Telegram chat
 - 🤝 **Business replies** on your behalf (Telegram Business)
 - 🧠 **Conversation memory** — SQLite keeps per-chat history across sessions
+- 🪪 **Contact lookup** — on a new contact's first message, fetches their profile (name, username, bio, phone if visible) via the userbot and caches it for future context
 - 🎙️ **Voice messages** — automatic transcription (ffmpeg + Google STT, no API keys)
 - 🖼️ **Photos** — Claude sees and describes incoming images
 - 💬 **Reply triggers** — reply to the bot's message without a keyword; it still responds
@@ -149,7 +150,8 @@ Helper Python scripts for the userbot and media processing:
 
 | Script | Purpose |
 |---|---|
-| `get_biz_history.py <chat_id> [limit]` | Chat history from SQLite |
+| `get_biz_history.py <chat_id> [limit]` | Chat history from SQLite (includes cached contact info, if any) |
+| `get_contact_info.py <chat_id>` | Fetch a user's profile via the userbot, print as JSON (called automatically on first contact) |
 | `transcribe_voice.py <file.oga> [lang]` | Transcribe a voice message (deletes file after) |
 | `get_photo.py <chat_id> [limit] [dir]` | Download the latest photo from a chat |
 | `read_chat.py <peer> [limit]` | Read the latest messages |

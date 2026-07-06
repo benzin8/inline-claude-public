@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from '
 import { homedir } from 'os'
 import { join } from 'path'
 import { execFile } from 'child_process'
-import { saveMessage } from './db.js'
+import { saveMessage, isNewChat, saveContactInfo } from './db.js'
 
 const HERE = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
 mkdirSync(HERE, { recursive: true })
@@ -48,6 +48,25 @@ try {
 const PYTHON = process.env.INLINE_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 const USERBOT_DIR = process.env.INLINE_USERBOT_DIR ?? join(homedir(), '.claude', 'userbot')
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
+const CONTACT_PY = join(USERBOT_DIR, 'get_contact_info.py')
+
+// Fetch-once-per-contact: on the first message ever seen from a chat_id, ask the
+// userbot for their profile (bio, phone, premium, etc.) and cache it in `contacts`.
+// Fire-and-forget — must not delay trigger delivery for the current message.
+function fetchContactInfoIfNew(chatId: string): void {
+  if (!isNewChat(chatId)) return
+  execFile(PYTHON, [CONTACT_PY, chatId], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+    if (error) { elog(`  contact info fetch FAILED chat=${chatId}: ${error} ${stderr}`); return }
+    try {
+      const info = JSON.parse(stdout)
+      if (info.error) { elog(`  contact info fetch error chat=${chatId}: ${info.error}`); return }
+      saveContactInfo(chatId, info)
+      elog(`  contact info saved chat=${chatId}: ${stdout.trim()}`)
+    } catch (e) {
+      elog(`  contact info parse FAILED chat=${chatId}: ${e} out=${stdout}`)
+    }
+  })
+}
 const BRIDGE_TARGET = process.env.BRIDGE_TARGET ?? ''
 function deliverViaBridge(request_id: string, query: string, tag: string, historyBlock?: string): void {
   try {
@@ -376,6 +395,7 @@ bot.on('business_message', async ctx => {
 
   // Save every incoming business message to history (all contacts, not just triggers)
   const chatIdStr = String(chatId)
+  fetchContactInfoIfNew(chatIdStr) // must run BEFORE saveMessage, or isNewChat would already see this message
   if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
 
   // Trigger if: message mentions the bot/клод, OR is a reply to one of our messages
