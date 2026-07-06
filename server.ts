@@ -398,14 +398,14 @@ bot.on('business_message', async ctx => {
   fetchContactInfoIfNew(chatIdStr) // must run BEFORE saveMessage, or isNewChat would already see this message
   if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
 
-  // Trigger if: message mentions the bot/клод, is a reply to one of our messages,
-  // or is a video note (кружок) — video notes cannot carry a caption in Telegram,
-  // so there's no way to "mention" Клод in one; receiving it at all is the trigger.
+  // Trigger if: message mentions the bot/клод, OR is a reply to one of our messages.
+  // Video notes (кружки) can't carry a caption in Telegram — to trigger on one, reply
+  // to the video note message with a separate text mentioning Клод (replyMsg below picks
+  // up the video_note from the message being replied to).
   const lower = text.toLowerCase()
   const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-  const hasVideoNote = Boolean((msg as unknown as { video_note?: unknown }).video_note)
-  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs && !hasVideoNote) {
+  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs) {
     elog('  business_message: no trigger, skipping')
     return
   }
