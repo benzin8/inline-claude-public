@@ -2,7 +2,9 @@ name: Publish to npm
 
 # Publishes the package to npm whenever a version tag (v1.2.3) is pushed.
 #   git tag v1.0.1 && git push origin v1.0.1
-# Requires an NPM_TOKEN secret (Classic → Automation token) in the repo settings.
+# Requires an NPM_TOKEN secret in the repo settings — use a Granular Access Token
+# scoped to just this package (not a Classic Automation token, which can publish
+# ANY package on the account if it ever leaks).
 
 on:
   push:
@@ -14,10 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write # required for --provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -29,6 +32,6 @@ jobs:
         run: npm run build
 
       - name: Publish
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

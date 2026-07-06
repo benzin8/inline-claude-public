@@ -177,6 +177,21 @@ The userbot fallback exists because the harness does not surface notifications f
 
 ---
 
+## 🔒 Security
+
+Treat these files like passwords — anyone who has them can read your Telegram account
+and send messages as you:
+
+- **`~/.claude/userbot/*.session`** — the userbot's login session. Full access to your
+  Telegram account, no 2FA prompt needed.
+- **`.env`** (bot token, owner id) — whoever has the bot token can control your bot.
+
+Both are already covered by `.gitignore` and are never included in the published npm
+package (verify yourself with `npm pack --dry-run`) — just don't manually copy/paste
+them anywhere (chat, screenshot, issue report).
+
+---
+
 ## 🧑‍💻 Development
 
 ```bash
