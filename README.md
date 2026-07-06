@@ -69,6 +69,7 @@ Done. Type `@your_bot hello` in any chat.
 |---|---|---|
 | Node.js ≥ 18 | Server runtime | ✅ |
 | Python 3 + Telethon | Userbot delivers triggers into the session | ✅ |
+| `telegram@claude-plugins-official` plugin, enabled in the session that will answer, configured with the **bridge bot** token | Without it nothing delivers the trigger into the session — the userbot sends a plain Telegram message to the bridge bot, and only this plugin's channel surfaces it as a prompt | ✅ |
 | ffmpeg | Voice transcription | Only for voice |
 | Telegram Premium | Business Bot (Secretary Mode) | Only for business mode |
 
