@@ -49,7 +49,7 @@ async function stepUserbot(apiId: string, apiHash: string) {
 
   if (!existsSync(ubDir)) {
     print(`Папка ${ubDir} не найдена.`)
-    print('Создай её и скопируй туда auth.py + send_message.py + get_contact_info.py из репо.')
+    print('Создай её и скопируй туда auth.py + send_message.py + get_contact_info.py + delete_message.py из репо.')
     await ask('Нажми Enter когда готово...')
   }
 

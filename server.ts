@@ -49,6 +49,22 @@ const PYTHON = process.env.INLINE_PYTHON ?? (process.platform === 'win32' ? 'pyt
 const USERBOT_DIR = process.env.INLINE_USERBOT_DIR ?? join(homedir(), '.claude', 'userbot')
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
 const CONTACT_PY = join(USERBOT_DIR, 'get_contact_info.py')
+const DELETE_PY = join(USERBOT_DIR, 'delete_message.py')
+// Delete the raw "[[ic:...]]" bridge-delivery message from the bridge chat once Claude
+// has answered, so дима's chat with the bridge bot doesn't fill up with trigger noise.
+// Default on; set CLEANUP_BRIDGE_MSG=false in .env to keep the raw trigger messages.
+const CLEANUP_BRIDGE_MSG = process.env.CLEANUP_BRIDGE_MSG !== 'false'
+// request key (bare request_id for inline, `biz:${id}` for business) -> delivered message_id
+const bridgeDeliveryMsg = new Map<string, number>()
+function cleanupBridgeMsg(key: string): void {
+  if (!CLEANUP_BRIDGE_MSG) return
+  const msgId = bridgeDeliveryMsg.get(key)
+  if (!msgId) return
+  bridgeDeliveryMsg.delete(key)
+  execFile(PYTHON, [DELETE_PY, BRIDGE_TARGET, String(msgId)], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+    elog(`  bridge cleanup key=${key} msg=${msgId} out=${String(stdout).trim()} err=${String(stderr).trim()}${error ? ` error=${error}` : ''}`)
+  })
+}
 
 // Fetch-once-per-contact: on the first message ever seen from a chat_id, ask the
 // userbot for their profile (bio, phone, premium, etc.) and cache it in `contacts`.
@@ -85,6 +101,8 @@ function deliverViaBridge(request_id: string, query: string, tag: string, histor
     execFile(PYTHON, [SEND_PY, BRIDGE_TARGET, tmp], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
       const code = error?.code ?? 0
       elog(`  bridge fallback request_id=${request_id} exit=${code} out=${String(stdout).trim()} err=${String(stderr).trim()}`)
+      const m = String(stdout).match(/message_id=(\d+)/)
+      if (m) bridgeDeliveryMsg.set(request_id, Number(m[1]))
       try { rmSync(tmp) } catch {}
     })
   } catch (e) {
@@ -223,6 +241,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         parse_mode: 'HTML',
       })
       pending.delete(request_id)
+      cleanupBridgeMsg(request_id)
       elog(`inline_answer OK request_id=${request_id} len=${final.length}`)
       return { content: [{ type: 'text', text: `answered (request ${request_id})` }] }
     }
@@ -260,6 +279,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       if (sentMsgId) trackSentMsg(p.chatId, sentMsgId)
       bizPending.delete(biz_request_id)
+      cleanupBridgeMsg(`biz:${biz_request_id}`)
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
       elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in business chat (request ${biz_request_id})` }] }

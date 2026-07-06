@@ -91,6 +91,7 @@ Everything is configured via `.env` in the data directory (`~/.claude/inline-bot
 | `INLINE_DATA_DIR` | Data directory (DB, .env, logs) | `~/.claude/inline-bot` |
 | `INLINE_USERBOT_DIR` | Userbot scripts directory | `~/.claude/userbot` |
 | `INLINE_PYTHON` | Path to Python | `python3` (unix) / `python` (win) |
+| `CLEANUP_BRIDGE_MSG` | Delete the raw `[[ic:...]]` bridge-delivery message once Claude has answered, so the bridge chat doesn't fill up with trigger noise | `true` |
 
 Example `.env`:
 
@@ -154,6 +155,7 @@ Helper Python scripts for the userbot and media processing:
 |---|---|
 | `get_biz_history.py <chat_id> [limit]` | Chat history from SQLite (includes cached contact info, if any) |
 | `get_contact_info.py <chat_id>` | Fetch a user's profile via the userbot, print as JSON (called automatically on first contact) |
+| `delete_message.py <target> <message_id>` | Delete a message the userbot sent (used automatically to clean up bridge-delivery messages) |
 | `transcribe_voice.py <file.oga> [lang]` | Transcribe a voice message (deletes file after) |
 | `get_photo.py <chat_id> [limit] [dir]` | Download the latest photo from a chat |
 | `read_chat.py <peer> [limit]` | Read the latest messages |
