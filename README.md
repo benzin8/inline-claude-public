@@ -28,6 +28,7 @@ An MCP server for Claude Code that turns Claude into your Telegram assistant. Tw
 - 🪪 **Contact lookup** — on a new contact's first message, fetches their profile (name, username, bio, phone if visible) via the userbot and caches it for future context
 - 🎙️ **Voice messages** — automatic transcription (ffmpeg + Google STT, no API keys)
 - 🖼️ **Photos** — Claude sees and describes incoming images
+- ⭕ **Video notes (circles)** — Claude watches incoming video notes via the `watch` skill (requires the [claude-video](https://github.com/bradautomates/claude-video) plugin) and describes/transcribes them
 - 💬 **Reply triggers** — reply to the bot's message without a keyword; it still responds
 - 🔐 **Roles** — owner gets full access, guests are Q&A-only
 
@@ -72,6 +73,7 @@ Done. Type `@your_bot hello` in any chat.
 | Python 3 + Telethon | Userbot delivers triggers into the session | ✅ |
 | `telegram@claude-plugins-official` plugin, enabled in the session that will answer, configured with the **bridge bot** token | Without it nothing delivers the trigger into the session — the userbot sends a plain Telegram message to the bridge bot, and only this plugin's channel surfaces it as a prompt | ✅ |
 | ffmpeg | Voice transcription | Only for voice |
+| [claude-video](https://github.com/bradautomates/claude-video) plugin (`watch` skill) | Watching video notes (circles) | Only for video notes |
 | Telegram Premium | Business Bot (Secretary Mode) | Only for business mode |
 
 ---

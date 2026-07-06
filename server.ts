@@ -398,11 +398,14 @@ bot.on('business_message', async ctx => {
   fetchContactInfoIfNew(chatIdStr) // must run BEFORE saveMessage, or isNewChat would already see this message
   if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
 
-  // Trigger if: message mentions the bot/клод, OR is a reply to one of our messages
+  // Trigger if: message mentions the bot/клод, is a reply to one of our messages,
+  // or is a video note (кружок) — video notes cannot carry a caption in Telegram,
+  // so there's no way to "mention" Клод in one; receiving it at all is the trigger.
   const lower = text.toLowerCase()
   const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs) {
+  const hasVideoNote = Boolean((msg as unknown as { video_note?: unknown }).video_note)
+  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs && !hasVideoNote) {
     elog('  business_message: no trigger, skipping')
     return
   }
@@ -414,7 +417,7 @@ bot.on('business_message', async ctx => {
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
-  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string } }
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string } }
   const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
   const msgCast = msg as unknown as AnyMsg
 
@@ -454,6 +457,24 @@ bot.on('business_message', async ctx => {
     }
   }
 
+  // Download video note (кружок) if present in the trigger message or in a replied-to message
+  let videoNotePath: string | undefined
+  const videoNote = msgCast.video_note ?? replyMsg?.video_note
+  if (videoNote) {
+    try {
+      mkdirSync(join(HERE, 'tmp'), { recursive: true })
+      const fileInfo = await bot.api.getFile(videoNote.file_id)
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+      const resp = await fetch(url)
+      const buf = await resp.arrayBuffer()
+      videoNotePath = join(HERE, 'tmp', `biz_videonote_${biz_request_id}.mp4`)
+      writeFileSync(videoNotePath, Buffer.from(buf))
+      elog(`  video note saved: ${videoNotePath}`)
+    } catch (e) {
+      elog(`  video note download failed: ${e}`)
+    }
+  }
+
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
     ? `role=owner biz_chat=${chatId}`
@@ -461,6 +482,7 @@ bot.on('business_message', async ctx => {
   let queryFinal = query
   if (photoPath) queryFinal += ` [PHOTO:${photoPath}]`
   if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
+  if (videoNotePath) queryFinal += ` [VIDEO_NOTE:${videoNotePath}]`
   deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
 })
 
