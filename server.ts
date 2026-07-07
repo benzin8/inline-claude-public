@@ -171,7 +171,7 @@ const mcp = new Server(
 )
 
 // business request_id -> { businessConnectionId, chatId, messageId, query, ts }
-const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number }>()
+const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number; placeholderMsgId?: number }>()
 
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
@@ -260,6 +260,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const replyParams = { reply_parameters: { message_id: p.messageId } }
       let sentMsgId: number | undefined
       if (photoPath) {
+        // Can't turn a text placeholder into a photo message via edit — drop it instead.
+        if (p.placeholderMsgId) {
+          (bot.api.raw.deleteMessage as unknown as (params: Record<string, unknown>) => Promise<unknown>)({
+            business_connection_id: p.businessConnectionId, chat_id: p.chatId, message_id: p.placeholderMsgId,
+          }).catch(e => elog(`  placeholder delete failed: ${e}`))
+        }
         const { InputFile } = await import('grammy')
         const sent = await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<{ message_id: number }>)(
           p.chatId,
@@ -267,6 +273,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams },
         )
         sentMsgId = sent?.message_id
+      } else if (p.placeholderMsgId) {
+        // Edit the "💭 Думаю..." placeholder in place instead of sending a new message.
+        await (bot.api as unknown as { raw: { editMessageText: (params: Record<string, unknown>) => Promise<unknown> } }).raw.editMessageText({
+          business_connection_id: p.businessConnectionId,
+          chat_id: p.chatId,
+          message_id: p.placeholderMsgId,
+          text,
+          parse_mode: 'HTML',
+        }).catch(e => elog(`  placeholder edit failed: ${e}`))
+        sentMsgId = p.placeholderMsgId
       } else {
         const sent = await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
           business_connection_id: p.businessConnectionId,
@@ -435,6 +451,20 @@ bot.on('business_message', async ctx => {
   const biz_request_id = newId()
   bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, messageId: msg.message_id, query, ts: Date.now() })
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
+
+  // Instant deterministic "thinking" placeholder — sent by the server, not Claude,
+  // so the human sees we noticed their message right away while the actual answer
+  // (bridge -> Claude turn -> business_reply) is still in flight. business_reply
+  // edits this message in place instead of sending a separate one, when possible.
+  void (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
+    business_connection_id: connId,
+    chat_id: chatId,
+    text: '💭 Думаю...',
+    reply_parameters: { message_id: msg.message_id },
+  }).then(sent => {
+    const p = bizPending.get(biz_request_id)
+    if (p && sent?.message_id) { p.placeholderMsgId = sent.message_id; trackSentMsg(chatId, sent.message_id) }
+  }).catch(e => elog(`  placeholder send failed: ${e}`))
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
   type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string } }
