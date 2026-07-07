@@ -274,7 +274,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         )
         sentMsgId = sent?.message_id
       } else if (p.placeholderMsgId) {
-        // Edit the "💭 Думаю..." placeholder in place instead of sending a new message.
+        // Edit the "💬 Думаю..." placeholder in place instead of sending a new message.
         await (bot.api as unknown as { raw: { editMessageText: (params: Record<string, unknown>) => Promise<unknown> } }).raw.editMessageText({
           business_connection_id: p.businessConnectionId,
           chat_id: p.chatId,
@@ -459,7 +459,7 @@ bot.on('business_message', async ctx => {
   void (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
     business_connection_id: connId,
     chat_id: chatId,
-    text: '💭 Думаю...',
+    text: '💬 Думаю...',
     reply_parameters: { message_id: msg.message_id },
   }).then(sent => {
     const p = bizPending.get(biz_request_id)
