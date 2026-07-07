@@ -173,6 +173,9 @@ const mcp = new Server(
 // business request_id -> { businessConnectionId, chatId, messageId, query, ts }
 const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number }>()
 
+// button-message id -> context needed to route a button press back as a new trigger
+const bizButtonMsgs = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; buttons: string[] }>()
+
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
 function trackSentMsg(chatId: number, messageId: number): void {
@@ -215,6 +218,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path is set' },
           photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
           reply_to: { type: 'boolean', description: 'if true, reply directly to the triggering message (quote-reply)' },
+          buttons: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'optional inline keyboard button labels (e.g. ["Да", "Нет"]), one per row, max 8. Whoever taps one delivers a NEW [[ic:biz:...]] trigger back to you with the label they picked — handle it like any other business trigger.',
+          },
         },
         required: ['biz_request_id', 'text'],
       },
@@ -258,13 +266,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (bizText.length > 4096) text = bizEmoji + escHtmlBiz(text).slice(0, 4090) + '…'
       else text = bizText
       const replyParams = { reply_parameters: { message_id: p.messageId } }
+
+      const rawButtons = Array.isArray(args.buttons) ? (args.buttons as unknown[]).map(String).slice(0, 8) : []
+      const btnMsgId = rawButtons.length ? newId() : undefined
+      const keyboard = btnMsgId
+        ? rawButtons.reduce((kb, label, i) => kb.text(label, `bbtn:${btnMsgId}:${i}`).row(), new InlineKeyboard())
+        : undefined
+      const markupParams = keyboard ? { reply_markup: { inline_keyboard: keyboard.inline_keyboard } } : {}
+
       let sentMsgId: number | undefined
       if (photoPath) {
         const { InputFile } = await import('grammy')
         const sent = await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<{ message_id: number }>)(
           p.chatId,
           new InputFile(photoPath),
-          { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams },
+          { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams, ...markupParams },
         )
         sentMsgId = sent?.message_id
       } else {
@@ -274,10 +290,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           text,
           parse_mode: 'HTML',
           ...replyParams,
+          ...markupParams,
         })
         sentMsgId = sent?.message_id
       }
       if (sentMsgId) trackSentMsg(p.chatId, sentMsgId)
+      if (btnMsgId && sentMsgId) {
+        bizButtonMsgs.set(btnMsgId, { businessConnectionId: p.businessConnectionId, chatId: p.chatId, messageId: sentMsgId, buttons: rawButtons })
+      }
       bizPending.delete(biz_request_id)
       cleanupBridgeMsg(`biz:${biz_request_id}`)
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
@@ -513,7 +533,43 @@ bot.on('business_connection', async ctx => {
 })
 
 // swallow taps on the placeholder's "⏳ думаю…" button
-bot.on('callback_query:data', ctx => ctx.answerCallbackQuery({ text: 'Клод думает…' }).catch(() => {}))
+// swallow taps on the placeholder's "⏳ думаю…" button, route real button presses
+// (from business_reply's `buttons` option) as a new [[ic:biz:...]] trigger.
+bot.on('callback_query:data', async ctx => {
+  const data = ctx.callbackQuery.data ?? ''
+  const m = data.match(/^bbtn:(.+):(\d+)$/)
+  if (!m) { await ctx.answerCallbackQuery({ text: 'Клод думает…' }).catch(() => {}); return }
+
+  const [, btnMsgId, idxStr] = m
+  const btn = bizButtonMsgs.get(btnMsgId)
+  if (!btn) { await ctx.answerCallbackQuery({ text: 'Кнопка устарела' }).catch(() => {}); return }
+  const label = btn.buttons[Number(idxStr)] ?? '?'
+  await ctx.answerCallbackQuery({ text: `Выбрано: ${label}` }).catch(() => {})
+
+  // Remove the keyboard so it can't be pressed twice.
+  bot.api.raw.editMessageReplyMarkup({
+    business_connection_id: btn.businessConnectionId,
+    chat_id: btn.chatId,
+    message_id: btn.messageId,
+    reply_markup: { inline_keyboard: [] },
+  }).catch(e => elog(`  bbtn editMessageReplyMarkup failed: ${e}`))
+  bizButtonMsgs.delete(btnMsgId)
+
+  const fromId = ctx.from?.id
+  const biz_request_id = newId()
+  bizPending.set(biz_request_id, {
+    businessConnectionId: btn.businessConnectionId,
+    chatId: btn.chatId,
+    messageId: btn.messageId,
+    query: `Нажата кнопка: "${label}"`,
+    ts: Date.now(),
+  })
+  const senderTag = fromId === Number(OWNER_ID)
+    ? `role=owner biz_chat=${btn.chatId}`
+    : `role=guest who=${ctx.from?.username ?? '?'}:${fromId} biz_chat=${btn.chatId}`
+  elog(`  bbtn pressed btnMsgId=${btnMsgId} idx=${idxStr} label="${label}" by=${fromId} -> biz_request_id=${biz_request_id}`)
+  deliverViaBridge(`biz:${biz_request_id}`, `Нажата кнопка: "${label}"`, senderTag)
+})
 
 bot.catch(err => process.stderr.write(`inline-claude: handler error: ${err.error}\n`))
 
