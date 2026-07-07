@@ -459,7 +459,8 @@ bot.on('business_message', async ctx => {
   void (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
     business_connection_id: connId,
     chat_id: chatId,
-    text: '💬 Думаю...',
+    text: '<tg-emoji emoji-id="5368808376694248152">💬</tg-emoji> Думаю...',
+    parse_mode: 'HTML',
     reply_parameters: { message_id: msg.message_id },
   }).then(sent => {
     const p = bizPending.get(biz_request_id)
