@@ -468,9 +468,14 @@ bot.on('business_message', async ctx => {
   }).catch(e => elog(`  placeholder send failed: ${e}`))
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
-  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string } }
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; text?: string; caption?: string }
   const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
   const msgCast = msg as unknown as AnyMsg
+  // Plain-text reply target (no photo/voice/video_note of its own) — surface the quoted
+  // text so Claude can answer "что это такое"/"поясни" about a PREVIOUS text message.
+  const replyText = replyMsg && !replyMsg.photo?.length && !replyMsg.voice && !replyMsg.video_note
+    ? (replyMsg.text ?? replyMsg.caption ?? '').trim()
+    : ''
 
   // Download photo if present in the trigger message or in a replied-to message
   let photoPath: string | undefined
@@ -531,6 +536,7 @@ bot.on('business_message', async ctx => {
     ? `role=owner biz_chat=${chatId}`
     : `role=guest who=${msg.from?.username ?? '?'}:${fromId} biz_chat=${chatId}`
   let queryFinal = query
+  if (replyText) queryFinal += ` [REPLY_TO:"${replyText.length > 300 ? replyText.slice(0, 300) + '…' : replyText}"]`
   if (photoPath) queryFinal += ` [PHOTO:${photoPath}]`
   if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
   if (videoNotePath) queryFinal += ` [VIDEO_NOTE:${videoNotePath}]`
