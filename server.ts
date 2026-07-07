@@ -174,7 +174,7 @@ const mcp = new Server(
 const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number }>()
 
 // button-message id -> context needed to route a button press back as a new trigger
-const bizButtonMsgs = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; buttons: string[] }>()
+const bizButtonMsgs = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; buttons: string[]; forRole?: 'owner' | 'guest' }>()
 
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
@@ -222,6 +222,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'array',
             items: { type: 'string' },
             description: 'optional inline keyboard button labels (e.g. ["Да", "Нет"]), one per row, max 8. Whoever taps one delivers a NEW [[ic:biz:...]] trigger back to you with the label they picked — handle it like any other business trigger.',
+          },
+          buttons_for: {
+            type: 'string',
+            enum: ['owner', 'guest'],
+            description: 'optional — restrict who may tap the buttons. If set, a tap from the other party is silently rejected (shown "это не тебе") and no trigger is delivered; the buttons stay live for the intended person.',
           },
         },
         required: ['biz_request_id', 'text'],
@@ -296,7 +301,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       if (sentMsgId) trackSentMsg(p.chatId, sentMsgId)
       if (btnMsgId && sentMsgId) {
-        bizButtonMsgs.set(btnMsgId, { businessConnectionId: p.businessConnectionId, chatId: p.chatId, messageId: sentMsgId, buttons: rawButtons })
+        const buttonsFor = args.buttons_for === 'owner' || args.buttons_for === 'guest' ? args.buttons_for : undefined
+        bizButtonMsgs.set(btnMsgId, { businessConnectionId: p.businessConnectionId, chatId: p.chatId, messageId: sentMsgId, buttons: rawButtons, forRole: buttonsFor })
       }
       bizPending.delete(biz_request_id)
       cleanupBridgeMsg(`biz:${biz_request_id}`)
@@ -543,6 +549,14 @@ bot.on('callback_query:data', async ctx => {
   const [, btnMsgId, idxStr] = m
   const btn = bizButtonMsgs.get(btnMsgId)
   if (!btn) { await ctx.answerCallbackQuery({ text: 'Кнопка устарела' }).catch(() => {}); return }
+
+  const pressedByOwner = ctx.from?.id === Number(OWNER_ID)
+  if (btn.forRole && ((btn.forRole === 'owner') !== pressedByOwner)) {
+    await ctx.answerCallbackQuery({ text: 'Это не тебе', show_alert: true }).catch(() => {})
+    elog(`  bbtn REJECTED btnMsgId=${btnMsgId} forRole=${btn.forRole} pressedBy=${ctx.from?.id}`)
+    return
+  }
+
   const label = btn.buttons[Number(idxStr)] ?? '?'
   await ctx.answerCallbackQuery({ text: `Выбрано: ${label}` }).catch(() => {})
 
