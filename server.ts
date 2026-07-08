@@ -550,7 +550,7 @@ bot.on('business_message', async ctx => {
   }).catch(e => elog(`  placeholder send failed: ${e}`))
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
-  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; sticker?: { file_id: string; emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean }; text?: string; caption?: string }
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; video?: { file_id: string }; sticker?: { file_id: string; emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean }; text?: string; caption?: string }
   const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
   const msgCast = msg as unknown as AnyMsg
   // Plain-text reply target (no photo/voice/video_note of its own) — surface the quoted
@@ -613,6 +613,26 @@ bot.on('business_message', async ctx => {
     }
   }
 
+  // Download a regular (non-round) video if present in the trigger message or a
+  // replied-to message — same idea as кружок, just not cropped to a circle. Bot API
+  // getFile caps out at 20MB; larger videos will fail here and just skip silently.
+  let videoPath: string | undefined
+  const video = msgCast.video ?? replyMsg?.video
+  if (video) {
+    try {
+      mkdirSync(join(HERE, 'tmp'), { recursive: true })
+      const fileInfo = await bot.api.getFile(video.file_id)
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+      const resp = await fetch(url)
+      const buf = await resp.arrayBuffer()
+      videoPath = join(HERE, 'tmp', `biz_video_${biz_request_id}.mp4`)
+      writeFileSync(videoPath, Buffer.from(buf))
+      elog(`  video saved: ${videoPath}`)
+    } catch (e) {
+      elog(`  video download failed: ${e}`)
+    }
+  }
+
   // Download sticker if present in the trigger message or in a replied-to message.
   // Static (webp) stickers are downloaded so Claude can Read them like a photo.
   // Video stickers (.webm) are downloaded too — ffmpeg can grab a still frame from
@@ -665,6 +685,7 @@ bot.on('business_message', async ctx => {
   if (photoPath) queryFinal += ` [PHOTO:${photoPath}]`
   if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
   if (videoNotePath) queryFinal += ` [VIDEO_NOTE:${videoNotePath}]`
+  if (videoPath) queryFinal += ` [VIDEO:${videoPath}]`
   if (stickerPath) queryFinal += ` [STICKER:${stickerPath}]`
   if (stickerVideoPath) queryFinal += ` [STICKER_VIDEO:${stickerVideoPath}]`
   if (stickerInfo) queryFinal += ` [STICKER_INFO:${stickerInfo}]`
