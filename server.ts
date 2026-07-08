@@ -173,6 +173,10 @@ const mcp = new Server(
 // business request_id -> { businessConnectionId, chatId, messageId, query, ts }
 const bizPending = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; query: string; ts: number; placeholderMsgId?: number }>()
 
+// chatId -> last known business_connection_id for that chat (this process's lifetime).
+// Lets business_send target a chat without a live biz_request_id.
+const chatConnection = new Map<number, { connId: string; lastSeen: number }>()
+
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
 function trackSentMsg(chatId: number, messageId: number): void {
@@ -217,6 +221,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           reply_to: { type: 'boolean', description: 'if true, reply directly to the triggering message (quote-reply)' },
         },
         required: ['biz_request_id', 'text'],
+      },
+    },
+    {
+      name: 'business_send',
+      description:
+        'Send a NEW, unprompted message into a business chat the session has already seen this run (a follow-up — not tied to any specific incoming trigger). Use business_reply instead when answering a specific incoming message; use this only when business_reply\'s biz_request_id has already expired/been consumed, or you need to send a second message about the same topic. Only works for a chat_id that has sent at least one message during this session — errors otherwise.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'the business chat_id (numeric, as string) — must have sent at least one message in this session' },
+          text: { type: 'string', description: 'the message text (max ~4096 chars)' },
+          photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
+        },
+        required: ['chat_id', 'text'],
       },
     },
   ],
@@ -299,6 +317,40 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
       elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in business chat (request ${biz_request_id})` }] }
+    }
+    if (req.params.name === 'business_send') {
+      const chatIdNum = Number(args.chat_id)
+      let text = String(args.text ?? '')
+      const photoPath = args.photo_path ? String(args.photo_path) : undefined
+      const conn = chatConnection.get(chatIdNum)
+      if (!conn) throw new Error(`no known business connection for chat ${chatIdNum} in this session — it must send a message first`)
+      const bizEmoji = '<tg-emoji emoji-id="5368635272332352173">🎉</tg-emoji> '
+      const escHtmlSend = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const sendText = bizEmoji + escHtmlSend(text)
+      if (sendText.length > 4096) text = bizEmoji + escHtmlSend(text).slice(0, 4090) + '…'
+      else text = sendText
+      let sentMsgId: number | undefined
+      if (photoPath) {
+        const { InputFile } = await import('grammy')
+        const sent = await (bot.api.sendPhoto as unknown as (chatId: number, photo: unknown, opts: Record<string, unknown>) => Promise<{ message_id: number }>)(
+          chatIdNum,
+          new InputFile(photoPath),
+          { caption: text, parse_mode: 'HTML', business_connection_id: conn.connId },
+        )
+        sentMsgId = sent?.message_id
+      } else {
+        const sent = await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
+          business_connection_id: conn.connId,
+          chat_id: chatIdNum,
+          text,
+          parse_mode: 'HTML',
+        })
+        sentMsgId = sent?.message_id
+      }
+      if (sentMsgId) trackSentMsg(chatIdNum, sentMsgId)
+      saveMessage(String(chatIdNum), 'assistant', String(args.text ?? ''))
+      elog(`business_send OK chat=${chatIdNum} photo=${photoPath ?? 'none'} len=${text.length}`)
+      return { content: [{ type: 'text', text: `sent to business chat ${chatIdNum}` }] }
     }
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
   } catch (err) {
@@ -429,6 +481,10 @@ bot.on('business_message', async ctx => {
     return
   }
 
+  // Remember this chat's business_connection_id so business_send can target it later
+  // in this session, even without a live biz_request_id.
+  chatConnection.set(chatId, { connId, lastSeen: Date.now() })
+
   // Save every incoming business message to history (all contacts, not just triggers)
   const chatIdStr = String(chatId)
   fetchContactInfoIfNew(chatIdStr) // must run BEFORE saveMessage, or isNewChat would already see this message
@@ -468,12 +524,12 @@ bot.on('business_message', async ctx => {
   }).catch(e => elog(`  placeholder send failed: ${e}`))
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
-  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; text?: string; caption?: string }
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; sticker?: { file_id: string; emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean }; text?: string; caption?: string }
   const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
   const msgCast = msg as unknown as AnyMsg
   // Plain-text reply target (no photo/voice/video_note of its own) — surface the quoted
   // text so Claude can answer "что это такое"/"поясни" about a PREVIOUS text message.
-  const replyText = replyMsg && !replyMsg.photo?.length && !replyMsg.voice && !replyMsg.video_note
+  const replyText = replyMsg && !replyMsg.photo?.length && !replyMsg.voice && !replyMsg.video_note && !replyMsg.sticker
     ? (replyMsg.text ?? replyMsg.caption ?? '').trim()
     : ''
 
@@ -531,6 +587,33 @@ bot.on('business_message', async ctx => {
     }
   }
 
+  // Download sticker if present in the trigger message or in a replied-to message.
+  // Static (webp) stickers are downloaded so Claude can Read them like a photo.
+  // Animated (.tgs, Lottie) and video (.webm) stickers can't be rendered as a still
+  // image trivially — just pass emoji/set_name metadata instead of the raw file.
+  let stickerPath: string | undefined
+  let stickerInfo: string | undefined
+  const sticker = msgCast.sticker ?? replyMsg?.sticker
+  if (sticker) {
+    if (sticker.is_animated || sticker.is_video) {
+      stickerInfo = `${sticker.is_video ? 'video' : 'animated'} sticker${sticker.emoji ? `, emoji=${sticker.emoji}` : ''}${sticker.set_name ? `, set=${sticker.set_name}` : ''} (no still frame available)`
+      elog(`  sticker is animated/video, skipping download: ${stickerInfo}`)
+    } else {
+      try {
+        mkdirSync(join(HERE, 'tmp'), { recursive: true })
+        const fileInfo = await bot.api.getFile(sticker.file_id)
+        const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+        const resp = await fetch(url)
+        const buf = await resp.arrayBuffer()
+        stickerPath = join(HERE, 'tmp', `biz_sticker_${biz_request_id}.webp`)
+        writeFileSync(stickerPath, Buffer.from(buf))
+        elog(`  sticker saved: ${stickerPath}`)
+      } catch (e) {
+        elog(`  sticker download failed: ${e}`)
+      }
+    }
+  }
+
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
     ? `role=owner biz_chat=${chatId}`
@@ -540,6 +623,8 @@ bot.on('business_message', async ctx => {
   if (photoPath) queryFinal += ` [PHOTO:${photoPath}]`
   if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
   if (videoNotePath) queryFinal += ` [VIDEO_NOTE:${videoNotePath}]`
+  if (stickerPath) queryFinal += ` [STICKER:${stickerPath}]`
+  if (stickerInfo) queryFinal += ` [STICKER_INFO:${stickerInfo}]`
   deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
 })
 
