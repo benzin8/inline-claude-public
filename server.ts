@@ -615,15 +615,31 @@ bot.on('business_message', async ctx => {
 
   // Download sticker if present in the trigger message or in a replied-to message.
   // Static (webp) stickers are downloaded so Claude can Read them like a photo.
-  // Animated (.tgs, Lottie) and video (.webm) stickers can't be rendered as a still
-  // image trivially — just pass emoji/set_name metadata instead of the raw file.
+  // Video stickers (.webm) are downloaded too — ffmpeg can grab a still frame from
+  // them same as a video note. True animated (.tgs, Lottie/gzipped-JSON vector)
+  // stickers can't be rendered to a raster frame without a Lottie decoder — those
+  // still fall back to emoji/set_name metadata only.
   let stickerPath: string | undefined
+  let stickerVideoPath: string | undefined
   let stickerInfo: string | undefined
   const sticker = msgCast.sticker ?? replyMsg?.sticker
   if (sticker) {
-    if (sticker.is_animated || sticker.is_video) {
-      stickerInfo = `${sticker.is_video ? 'video' : 'animated'} sticker${sticker.emoji ? `, emoji=${sticker.emoji}` : ''}${sticker.set_name ? `, set=${sticker.set_name}` : ''} (no still frame available)`
-      elog(`  sticker is animated/video, skipping download: ${stickerInfo}`)
+    if (sticker.is_animated) {
+      stickerInfo = `animated (Lottie) sticker${sticker.emoji ? `, emoji=${sticker.emoji}` : ''}${sticker.set_name ? `, set=${sticker.set_name}` : ''} (no still frame available)`
+      elog(`  sticker is animated (tgs), skipping download: ${stickerInfo}`)
+    } else if (sticker.is_video) {
+      try {
+        mkdirSync(join(HERE, 'tmp'), { recursive: true })
+        const fileInfo = await bot.api.getFile(sticker.file_id)
+        const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+        const resp = await fetch(url)
+        const buf = await resp.arrayBuffer()
+        stickerVideoPath = join(HERE, 'tmp', `biz_sticker_${biz_request_id}.webm`)
+        writeFileSync(stickerVideoPath, Buffer.from(buf))
+        elog(`  video sticker saved: ${stickerVideoPath}`)
+      } catch (e) {
+        elog(`  video sticker download failed: ${e}`)
+      }
     } else {
       try {
         mkdirSync(join(HERE, 'tmp'), { recursive: true })
@@ -650,6 +666,7 @@ bot.on('business_message', async ctx => {
   if (voicePath) queryFinal += ` [VOICE:${voicePath}]`
   if (videoNotePath) queryFinal += ` [VIDEO_NOTE:${videoNotePath}]`
   if (stickerPath) queryFinal += ` [STICKER:${stickerPath}]`
+  if (stickerVideoPath) queryFinal += ` [STICKER_VIDEO:${stickerVideoPath}]`
   if (stickerInfo) queryFinal += ` [STICKER_INFO:${stickerInfo}]`
   deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
 })
