@@ -888,6 +888,29 @@ bot.on('message:text', async ctx => {
 })
 
 // Log business_connection updates (to see can_reply flag)
+// Guard: only the owner may add this bot to a group. Anyone else's group is a much
+// wider trigger surface than a 1:1 business contact (any member can then invoke the
+// bot as a guest) — дима explicitly wants this locked down. If someone other than
+// OWNER_ID adds/re-adds the bot to a group/supergroup, leave immediately.
+bot.on('my_chat_member', async ctx => {
+  const upd = ctx.myChatMember
+  const chat = upd.chat
+  if (chat.type !== 'group' && chat.type !== 'supergroup') return
+  const newStatus = upd.new_chat_member.status
+  const becameMember = newStatus === 'member' || newStatus === 'administrator'
+  if (!becameMember) return
+  const actorId = String(upd.from.id)
+  if (actorId === OWNER_ID) {
+    elog(`my_chat_member: owner added bot to chat=${chat.id} ("${chat.title}") — staying`)
+    return
+  }
+  elog(`my_chat_member: non-owner (${actorId}) added bot to chat=${chat.id} ("${chat.title}") — leaving`)
+  try {
+    await bot.api.sendMessage(chat.id, 'Этого бота может добавлять только его владелец. Покидаю чат.')
+  } catch { /* best-effort — leave regardless */ }
+  await bot.api.leaveChat(chat.id).catch(e => elog(`  leaveChat failed: ${e}`))
+})
+
 bot.on('business_connection', async ctx => {
   const bc = ctx.update.business_connection as unknown as { id?: string; user?: { id?: number }; can_reply?: boolean; rights?: unknown; is_enabled?: boolean }
   elog(`business_connection id=${bc?.id} user=${bc?.user?.id} can_reply=${bc?.can_reply ?? JSON.stringify(bc?.rights)} is_enabled=${bc?.is_enabled}`)
@@ -990,7 +1013,7 @@ void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
-        allowed_updates: [...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'inline_query', 'chosen_inline_result', 'business_connection', 'business_message', 'edited_business_message'],
+        allowed_updates: [...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'inline_query', 'chosen_inline_result', 'business_connection', 'business_message', 'edited_business_message', 'my_chat_member'],
         onStart: info => {
           attempt = 0
           process.stderr.write(`inline-claude: polling as @${info.username}\n`)
