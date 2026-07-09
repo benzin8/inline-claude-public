@@ -651,7 +651,8 @@ bot.on('business_message', async ctx => {
   const lower = text.toLowerCase()
   const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-  if (!lower.includes('@claude_inline_bot') && !lower.includes('клод,') && !lower.startsWith('клод ') && !isReplyToUs) {
+  const triggerPhrase = lower.includes('клод,') || lower.startsWith('клод ') || lower.includes('claude,') || lower.startsWith('claude ')
+  if (!lower.includes('@claude_inline_bot') && !triggerPhrase && !isReplyToUs) {
     elog('  business_message: no trigger, skipping')
     return
   }
@@ -879,7 +880,7 @@ bot.on('message:text', async ctx => {
     // (/mybots → bot → Bot Settings → Group Privacy → Turn off) to receive every
     // group message and let the phrase check below work like it does in business chats.
     const lower = text.toLowerCase()
-    const phraseMatch = lower.includes('клод,') || lower.startsWith('клод ')
+    const phraseMatch = lower.includes('клод,') || lower.startsWith('клод ') || lower.includes('claude,') || lower.startsWith('claude ')
     if (!phraseMatch && !isReplyToUs) return
   }
   // Private chat: any message is addressed to us, no mention/phrase needed.
