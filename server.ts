@@ -24,9 +24,34 @@ const HERE = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-b
 mkdirSync(HERE, { recursive: true })
 const ENV_FILE = join(HERE, '.env')
 const LOG_FILE = join(HERE, 'events.log')
+const CRASH_FILE = join(HERE, 'crash.log')
 function elog(msg: string): void {
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`) } catch {}
 }
+// Persistent crash log. Unlike stderr (which the Claude Code harness swallows),
+// this survives the process death so the next session can see WHY it died.
+// Every entry also mirrors into events.log so the timeline stays in one place.
+function crashLog(tag: string, detail: unknown): void {
+  const err = detail instanceof Error
+    ? `${detail.name}: ${detail.message}\n${detail.stack ?? ''}`
+    : (() => { try { return typeof detail === 'string' ? detail : JSON.stringify(detail) } catch { return String(detail) } })()
+  const line = `${new Date().toISOString()} [${tag}] ${err}`
+  try { appendFileSync(CRASH_FILE, line + '\n' + '─'.repeat(60) + '\n') } catch {}
+  elog(`!! ${tag}: ${String(err).split('\n')[0]}`)
+  try { process.stderr.write(`inline-claude: ${tag}: ${err}\n`) } catch {}
+}
+// Global safety net: without these, an unhandled throw/rejection kills the
+// process with only a stderr trace (invisible after death). Log, flush, exit.
+process.on('uncaughtException', (err, origin) => {
+  crashLog('uncaughtException', err instanceof Error ? err : `${origin}: ${String(err)}`)
+  process.exit(1)
+})
+process.on('unhandledRejection', reason => {
+  crashLog('unhandledRejection', reason)
+  process.exit(1)
+})
+process.on('warning', w => crashLog('warning', w))
+process.on('exit', code => elog(`process exit code=${code} pid=${process.pid}`))
 
 // Load ./.env into process.env (real env wins). MUST run before any
 // process.env.* reads below (BRIDGE_TARGET/PYTHON/TOKEN/OWNER_ID) — otherwise
@@ -110,6 +135,22 @@ function deliverViaBridge(request_id: string, query: string, tag: string, histor
   }
 }
 
+// Deliver a PLAIN message into the session (no [[ic:...]] wrapper) — surfaces as a normal
+// owner message via the bridge. Used for owner-poll answers, which aren't inline/biz
+// triggers and need no tool response, just to be read.
+function deliverPlainToBridge(text: string): void {
+  try {
+    const tmp = join(HERE, `plain_${newId()}.txt`)
+    writeFileSync(tmp, text)
+    execFile(PYTHON, [SEND_PY, BRIDGE_TARGET, tmp], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+      elog(`  plain bridge deliver exit=${error?.code ?? 0} err=${String(stderr).trim()}`)
+      try { rmSync(tmp) } catch {}
+    })
+  } catch (e) {
+    elog(`  plain bridge deliver FAILED: ${e}`)
+  }
+}
+
 const TOKEN = process.env.INLINE_BOT_TOKEN
 const OWNER_ID = process.env.OWNER_ID // owner's telegram user id, as string
 
@@ -180,6 +221,10 @@ const chatConnection = new Map<number, { connId: string; lastSeen: number }>()
 // button-message id -> context needed to route a button press back as a new trigger
 const bizButtonMsgs = new Map<string, { businessConnectionId: string; chatId: number; messageId: number; buttons: string[]; forRole?: 'owner' | 'guest' }>()
 
+// poll id -> owner-poll context (ask_owner tool): a button survey sent to the owner's
+// private chat. When the owner taps a button, the choice is delivered back into the session.
+const ownerPolls = new Map<string, { question: string; options: string[]; messageId: number }>()
+
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
 function trackSentMsg(chatId: number, messageId: number): void {
@@ -248,6 +293,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
         },
         required: ['chat_id', 'text'],
+      },
+    },
+    {
+      name: 'ask_owner',
+      description:
+        "Ask the OWNER a multiple-choice question in their private Telegram chat, rendered as tappable inline-keyboard buttons. Use this instead of a terminal survey whenever you need the owner to pick between options (e.g. brainstorming/design decisions) — the owner reads Telegram, not the terminal. The owner taps a button and their choice is delivered back into this session as a normal message (\"[ответ на опрос] «...» → <choice>\"); no tool response is needed, just read it and continue. Requires the owner to have started the bot in a private chat (errors otherwise — then fall back to numbered text options via the normal reply).",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'the question to show above the buttons' },
+          options: { type: 'array', items: { type: 'string' }, description: '2-8 button labels the owner can tap' },
+        },
+        required: ['question', 'options'],
       },
     },
   ],
@@ -378,6 +436,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       elog(`business_send OK chat=${chatIdNum} photo=${photoPath ?? 'none'} len=${text.length}`)
       return { content: [{ type: 'text', text: `sent to business chat ${chatIdNum}` }] }
     }
+    if (req.params.name === 'ask_owner') {
+      if (!OWNER_ID) throw new Error('OWNER_ID not configured')
+      const question = String(args.question ?? '').trim()
+      const options = Array.isArray(args.options) ? (args.options as unknown[]).map(String).filter(s => s.trim()).slice(0, 8) : []
+      if (!question) throw new Error('question is required')
+      if (options.length < 2) throw new Error('need at least 2 options')
+      const pollId = newId()
+      const keyboard = options.reduce((kb, label, i) => kb.text(label, `poll:${pollId}:${i}`).row(), new InlineKeyboard())
+      let sentMsgId: number | undefined
+      try {
+        const sent = await (bot.api as unknown as { raw: { sendMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendMessage({
+          chat_id: Number(OWNER_ID),
+          text: question,
+          reply_markup: { inline_keyboard: keyboard.inline_keyboard },
+        })
+        sentMsgId = sent?.message_id
+      } catch (e) {
+        throw new Error(`can't DM the owner (has the owner opened a private chat with the bot and pressed Start?): ${e instanceof Error ? e.message : e}`)
+      }
+      ownerPolls.set(pollId, { question, options, messageId: sentMsgId ?? 0 })
+      elog(`ask_owner sent pollId=${pollId} opts=${options.length} msg=${sentMsgId}`)
+      return { content: [{ type: 'text', text: `asked owner (poll ${pollId}) — awaiting their tap, the choice will arrive as a normal message` }] }
+    }
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -385,7 +466,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-await mcp.connect(new StdioServerTransport())
+const mcpTransport = new StdioServerTransport()
+// Diagnostics: log when the MCP stdio link to Claude closes or errors. If we see
+// this line, the harness (client) tore down the connection — NOT a bot crash.
+// If the process vanishes WITHOUT this line and without a crash.log entry, it was
+// force-killed externally (e.g. Windows TerminateProcess from the harness).
+mcpTransport.onclose = () => elog('MCP transport CLOSED (client disconnected)')
+mcpTransport.onerror = err => crashLog('MCP transport error', err)
+mcp.onclose = () => elog('MCP server CLOSED')
+mcp.onerror = err => crashLog('MCP server error', err)
+await mcp.connect(mcpTransport)
+elog(`MCP connected pid=${process.pid} node=${process.version}`)
 
 // --- Telegram handlers ---
 
@@ -703,6 +794,24 @@ bot.on('business_connection', async ctx => {
 // (from business_reply's `buttons` option) as a new [[ic:biz:...]] trigger.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data ?? ''
+
+  // Owner poll answer (from the ask_owner tool). Only the owner may answer; the choice
+  // is delivered back into the session as a plain message.
+  const pm = data.match(/^poll:(.+):(\d+)$/)
+  if (pm) {
+    const [, pollId, pIdx] = pm
+    const poll = ownerPolls.get(pollId)
+    if (!poll) { await ctx.answerCallbackQuery({ text: 'Опрос устарел' }).catch(() => {}); return }
+    if (ctx.from?.id !== Number(OWNER_ID)) { await ctx.answerCallbackQuery({ text: 'Это не тебе', show_alert: true }).catch(() => {}); return }
+    const choice = poll.options[Number(pIdx)] ?? '?'
+    await ctx.answerCallbackQuery({ text: `Выбрано: ${choice}` }).catch(() => {})
+    await ctx.editMessageText(`${poll.question}\n\n✅ ${choice}`, { reply_markup: { inline_keyboard: [] } }).catch(e => elog(`  poll edit failed: ${e}`))
+    ownerPolls.delete(pollId)
+    elog(`  poll answered pollId=${pollId} idx=${pIdx} choice="${choice}"`)
+    deliverPlainToBridge(`[ответ на опрос] «${poll.question}» → ${choice}`)
+    return
+  }
+
   const m = data.match(/^bbtn:(.+):(\d+)$/)
   if (!m) { await ctx.answerCallbackQuery({ text: 'Клод думает…' }).catch(() => {}); return }
 
@@ -745,29 +854,32 @@ bot.on('callback_query:data', async ctx => {
   deliverViaBridge(`biz:${biz_request_id}`, `Нажата кнопка: "${label}"`, senderTag)
 })
 
-bot.catch(err => process.stderr.write(`inline-claude: handler error: ${err.error}\n`))
+bot.catch(err => crashLog('bot.catch handler error', err.error))
 
 // --- lifecycle ---
 let shuttingDown = false
-function shutdown(): void {
+function shutdown(reason = 'unknown'): void {
   if (shuttingDown) return
   shuttingDown = true
+  elog(`SHUTDOWN reason=${reason} pid=${process.pid}`)
   try { if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE) } catch {}
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve(bot.stop()).finally(() => process.exit(0))
 }
-process.stdin.on('end', shutdown)
-process.stdin.on('close', shutdown)
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
-process.on('SIGHUP', shutdown)
+process.stdin.on('end', () => shutdown('stdin-end'))
+process.stdin.on('close', () => shutdown('stdin-close'))
+process.stdin.on('error', e => shutdown(`stdin-error:${e}`))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGHUP', () => shutdown('SIGHUP'))
 
 const bootPpid = process.ppid
 setInterval(() => {
-  const orphaned =
-    (process.platform !== 'win32' && process.ppid !== bootPpid) ||
-    process.stdin.destroyed || process.stdin.readableEnded
-  if (orphaned) shutdown()
+  let reason = ''
+  if (process.platform !== 'win32' && process.ppid !== bootPpid) reason = `reparented ppid ${bootPpid}->${process.ppid}`
+  else if (process.stdin.destroyed) reason = 'stdin-destroyed'
+  else if (process.stdin.readableEnded) reason = 'stdin-readableEnded'
+  if (reason) shutdown(`orphan-check:${reason}`)
 }, 5000).unref()
 
 void (async () => {
@@ -787,11 +899,11 @@ void (async () => {
       if (err instanceof Error && err.message === 'Aborted delay') return
       const is409 = err instanceof GrammyError && err.error_code === 409
       if (is409 && attempt >= 8) {
-        process.stderr.write('inline-claude: 409 Conflict persists — another poller holds the token. Exiting.\n')
+        crashLog('poller 409 fatal', 'another poller holds the token — exiting')
         return
       }
       const delay = Math.min(1000 * attempt, 15000)
-      process.stderr.write(`inline-claude: start error (${err}), retry in ${delay/1000}s\n`)
+      crashLog(`poller start error (retry ${attempt} in ${delay/1000}s)`, err)
       await new Promise(r => setTimeout(r, delay))
     }
   }
