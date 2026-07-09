@@ -23,6 +23,7 @@ An MCP server for Claude Code that turns Claude into your Telegram assistant. Tw
 ## ✨ Features
 
 - 💬 **Inline queries** in any Telegram chat
+- 👥 **Direct chat** — DM the bot directly, or add it to a group (mention it or reply to its message) and talk to it there
 - 🤝 **Business replies** on your behalf (Telegram Business)
 - 🧠 **Conversation memory** — SQLite keeps per-chat history across sessions
 - 🪪 **Contact lookup** — on a new contact's first message, fetches their profile (name, username, bio, phone if visible) via the userbot and caches it for future context

@@ -52,7 +52,17 @@
 [[ic:REQUEST_ID role=owner biz_chat=CHATID]] вопрос [маркеры]
 [[ic:REQUEST_ID role=guest who=username:ID biz_chat=CHATID]] вопрос
 [[ic:biz:ID role=owner biz_chat=CHATID]] бизнес-тригер
+[[ic:chat:ID role=owner chat_id=CHATID chat_type=private]] прямое сообщение боту @claude_inline_bot
+[[ic:chat:ID role=guest who=username:ID chat_id=CHATID chat_type=group ANSWER-ONLY]] упоминание в группе
 ```
+
+**`chat:` тригер** — сообщение НАПРЯМУЮ боту @claude_inline_bot: либо личка с самим
+ботом (не через inline-режим "@бот вопрос", а обычное сообщение), либо группа, куда
+бота добавили (сработает только если бота упомянули `@claude_inline_bot` в тексте
+или ответили на его предыдущее сообщение — стандартный privacy mode Telegram-ботов
+в группах). Отвечай через **`chat_reply(chat_request_id, text)`** — это третий
+инструмент ответа, отдельный от business_reply и inline_answer. В группах отвечай
+максимально коротко и по делу — там читают все участники, а не только владелец.
 
 **Маркеры вложений** (добавляет сервер автоматически):
 - `[REPLY_TO:"текст"]` — тригер-сообщение было ответом (reply) на ЧУЖОЕ текстовое
@@ -107,7 +117,8 @@
 | Тип тригера | Правильный инструмент |
 |---|---|
 | `[[ic:biz:ID ...]]` | **`business_reply(ID, ...)`** — ответ попадает в чат с собеседником |
-| `[[ic:ID ...]]` (без `biz:`) | **`inline_answer(ID, ...)`** — редактирует placeholder |
+| `[[ic:chat:ID ...]]` | **`chat_reply(ID, ...)`** — личка/группа с ботом @claude_inline_bot напрямую |
+| `[[ic:ID ...]]` (без `biz:`/`chat:`) | **`inline_answer(ID, ...)`** — редактирует placeholder |
 | Прямое сообщение владельца | **`telegram reply`** — прямой ответ в личку |
 
 **НИКОГДА не отвечай через `telegram reply` на бизнес-тригеры** — ответ уйдёт в личку

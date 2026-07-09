@@ -225,6 +225,10 @@ const bizButtonMsgs = new Map<string, { businessConnectionId: string; chatId: nu
 // private chat. When the owner taps a button, the choice is delivered back into the session.
 const ownerPolls = new Map<string, { question: string; options: string[]; messageId: number }>()
 
+// chat request_id -> plain-chat context (bot added to a group, or DMed directly —
+// NOT via inline_query and NOT a business_message). Lets chat_reply answer it.
+const chatPending = new Map<string, { chatId: number; messageId: number; query: string; ts: number; placeholderMsgId?: number }>()
+
 // chatId -> Set of message_ids we sent via business_reply (to detect reply-to-our-message)
 const botSentMsgIds = new Map<number, Set<number>>()
 function trackSentMsg(chatId: number, messageId: number): void {
@@ -306,6 +310,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           options: { type: 'array', items: { type: 'string' }, description: '2-8 button labels the owner can tap' },
         },
         required: ['question', 'options'],
+      },
+    },
+    {
+      name: 'chat_reply',
+      description:
+        'Reply to a message sent directly to the inline-claude bot itself (@claude_inline_bot) — either a DM to the bot, or a mention/reply to it in a group it has been added to. Pass the chat_request_id from the [[ic:chat:...]] bridge trigger. Distinct from business_reply (Business Bot connection) and inline_answer (inline query placeholder).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_request_id: { type: 'string', description: 'chat_request_id from the [[ic:chat:...]] bridge trigger' },
+          text: { type: 'string', description: 'the reply text (max ~4096 chars)' },
+        },
+        required: ['chat_request_id', 'text'],
       },
     },
   ],
@@ -458,6 +475,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       ownerPolls.set(pollId, { question, options, messageId: sentMsgId ?? 0 })
       elog(`ask_owner sent pollId=${pollId} opts=${options.length} msg=${sentMsgId}`)
       return { content: [{ type: 'text', text: `asked owner (poll ${pollId}) — awaiting their tap, the choice will arrive as a normal message` }] }
+    }
+    if (req.params.name === 'chat_reply') {
+      const chat_request_id = String(args.chat_request_id)
+      let text = String(args.text ?? '')
+      const p = chatPending.get(chat_request_id)
+      if (!p) throw new Error(`unknown or expired chat_request_id: ${chat_request_id}`)
+      if (text.length > 4096) text = text.slice(0, 4090) + '…'
+      let sentMsgId: number | undefined
+      if (p.placeholderMsgId) {
+        await bot.api.editMessageText(p.chatId, p.placeholderMsgId, text).catch(e => elog(`  chat placeholder edit failed: ${e}`))
+        sentMsgId = p.placeholderMsgId
+      } else {
+        const sent = await bot.api.sendMessage(p.chatId, text, { reply_parameters: { message_id: p.messageId } })
+        sentMsgId = sent.message_id
+      }
+      if (sentMsgId) trackSentMsg(p.chatId, sentMsgId)
+      chatPending.delete(chat_request_id)
+      cleanupBridgeMsg(`chat:${chat_request_id}`)
+      elog(`chat_reply OK chat_request_id=${chat_request_id} len=${text.length}`)
+      return { content: [{ type: 'text', text: `replied in chat (request ${chat_request_id})` }] }
     }
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
   } catch (err) {
@@ -781,6 +818,50 @@ bot.on('business_message', async ctx => {
   if (stickerVideoPath) queryFinal += ` [STICKER_VIDEO:${stickerVideoPath}]`
   if (stickerInfo) queryFinal += ` [STICKER_INFO:${stickerInfo}]`
   deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
+})
+
+// Direct messages to the inline-claude bot itself — either a private DM (not via
+// inline_query) or a message in a group the bot has been added to. Distinct from
+// business_message (Business Bot connection) and inline_query (the @bot-mention
+// picker flow). In groups, Telegram's default bot privacy mode already limits what
+// we see to messages that @mention us or reply to our own message — no extra
+// filtering needed for that case. In private chats, every message is a DM to us,
+// so no mention is required.
+bot.on('message:text', async ctx => {
+  const chat = ctx.chat // message:text implies a regular chat, never 'channel'
+  const fromUser = ctx.from
+  if (!fromUser || fromUser.is_bot) return
+
+  const text = ctx.message.text
+  const chatId = chat.id
+  const msgId = ctx.message.message_id
+  const replyToMsgId = ctx.message.reply_to_message?.message_id
+  const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
+
+  if (chat.type === 'group' || chat.type === 'supergroup') {
+    const uname = bot.botInfo?.username?.toLowerCase()
+    const mentioned = uname ? text.toLowerCase().includes(`@${uname}`) : false
+    if (!mentioned && !isReplyToUs) return
+  }
+  // Private chat: any message is addressed to us, no mention needed.
+
+  const query = bot.botInfo?.username ? text.replace(new RegExp(`@${bot.botInfo.username}`, 'gi'), '').trim() || text.trim() : text.trim()
+  const chat_request_id = newId()
+  chatPending.set(chat_request_id, { chatId, messageId: msgId, query, ts: Date.now() })
+  elog(`chat message chat=${chatId} type=${chat.type} from=${fromUser.id} chat_request_id=${chat_request_id}`)
+
+  // Same deterministic "thinking" placeholder as business_message.
+  void bot.api.sendMessage(chatId, '💬 Думаю...', { reply_parameters: { message_id: msgId } })
+    .then(sent => {
+      const p = chatPending.get(chat_request_id)
+      if (p) { p.placeholderMsgId = sent.message_id; trackSentMsg(chatId, sent.message_id) }
+    })
+    .catch(e => elog(`  chat placeholder send failed: ${e}`))
+
+  const senderTag = String(fromUser.id) === OWNER_ID
+    ? `role=owner chat_id=${chatId} chat_type=${chat.type}`
+    : `role=guest who=${fromUser.username ?? '?'}:${fromUser.id} chat_id=${chatId} chat_type=${chat.type} ANSWER-ONLY`
+  deliverViaBridge(`chat:${chat_request_id}`, query, senderTag)
 })
 
 // Log business_connection updates (to see can_reply flag)
