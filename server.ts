@@ -827,30 +827,12 @@ bot.on('business_message', async ctx => {
 // we see to messages that @mention us or reply to our own message — no extra
 // filtering needed for that case. In private chats, every message is a DM to us,
 // so no mention is required.
-bot.on('message:text', async ctx => {
-  const chat = ctx.chat // message:text implies a regular chat, never 'channel'
-  const fromUser = ctx.from
-  if (!fromUser || fromUser.is_bot) return
-
-  const text = ctx.message.text
-  const chatId = chat.id
-  const msgId = ctx.message.message_id
-  const replyToMsgId = ctx.message.reply_to_message?.message_id
-  const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-
-  if (chat.type === 'group' || chat.type === 'supergroup') {
-    const uname = bot.botInfo?.username?.toLowerCase()
-    const mentioned = uname ? text.toLowerCase().includes(`@${uname}`) : false
-    if (!mentioned && !isReplyToUs) return
-  }
-  // Private chat: any message is addressed to us, no mention needed.
-
-  const query = bot.botInfo?.username ? text.replace(new RegExp(`@${bot.botInfo.username}`, 'gi'), '').trim() || text.trim() : text.trim()
+// Shared by both the /ask command and plain-text triggers below.
+function deliverChatTrigger(chatId: number, msgId: number, fromUser: { id: number; username?: string }, query: string, chatType: string): void {
   const chat_request_id = newId()
   chatPending.set(chat_request_id, { chatId, messageId: msgId, query, ts: Date.now() })
-  elog(`chat message chat=${chatId} type=${chat.type} from=${fromUser.id} chat_request_id=${chat_request_id}`)
+  elog(`chat message chat=${chatId} type=${chatType} from=${fromUser.id} chat_request_id=${chat_request_id}`)
 
-  // Same deterministic "thinking" placeholder as business_message.
   void bot.api.sendMessage(chatId, '💬 Думаю...', { reply_parameters: { message_id: msgId } })
     .then(sent => {
       const p = chatPending.get(chat_request_id)
@@ -859,9 +841,50 @@ bot.on('message:text', async ctx => {
     .catch(e => elog(`  chat placeholder send failed: ${e}`))
 
   const senderTag = String(fromUser.id) === OWNER_ID
-    ? `role=owner chat_id=${chatId} chat_type=${chat.type}`
-    : `role=guest who=${fromUser.username ?? '?'}:${fromUser.id} chat_id=${chatId} chat_type=${chat.type} ANSWER-ONLY`
+    ? `role=owner chat_id=${chatId} chat_type=${chatType}`
+    : `role=guest who=${fromUser.username ?? '?'}:${fromUser.id} chat_id=${chatId} chat_type=${chatType} ANSWER-ONLY`
   deliverViaBridge(`chat:${chat_request_id}`, query, senderTag)
+}
+
+// Guaranteed to work in ANY group regardless of the bot's privacy-mode setting —
+// Telegram always delivers slash commands to bots even with privacy mode ON.
+// Typing "@claude_inline_bot ..." does NOT work as a plain-text mention in groups:
+// Telegram's client intercepts "@<bot_with_inline_support>" and opens the inline-query
+// picker instead of letting you type it as message text — there is no client-side way
+// around that, so /ask is the reliable trigger, not an @mention.
+bot.command('ask', async ctx => {
+  const fromUser = ctx.from
+  if (!fromUser || fromUser.is_bot) return
+  const query = ctx.match?.trim() || '(пустой вопрос)'
+  deliverChatTrigger(ctx.chat.id, ctx.message!.message_id, fromUser, query, ctx.chat.type)
+})
+
+bot.on('message:text', async ctx => {
+  const chat = ctx.chat // message:text implies a regular chat, never 'channel'
+  const fromUser = ctx.from
+  if (!fromUser || fromUser.is_bot) return
+  if (ctx.message.text.startsWith('/')) return // commands are handled separately above
+
+  const text = ctx.message.text
+  const chatId = chat.id
+  const msgId = ctx.message.message_id
+  const replyToMsgId = ctx.message.reply_to_message?.message_id
+  const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
+
+  if (chat.type === 'group' || chat.type === 'supergroup') {
+    // NOTE: with the bot's default privacy mode (group privacy ON), Telegram only
+    // delivers group messages to us that are commands, replies to our own message, or
+    // @mention us — a plain "клод, ..." with no mention/reply never reaches this
+    // handler at all (filtered server-side). Disable privacy mode via @BotFather
+    // (/mybots → bot → Bot Settings → Group Privacy → Turn off) to receive every
+    // group message and let the phrase check below work like it does in business chats.
+    const lower = text.toLowerCase()
+    const phraseMatch = lower.includes('клод,') || lower.startsWith('клод ')
+    if (!phraseMatch && !isReplyToUs) return
+  }
+  // Private chat: any message is addressed to us, no mention/phrase needed.
+
+  deliverChatTrigger(chatId, msgId, fromUser, text.trim(), chat.type)
 })
 
 // Log business_connection updates (to see can_reply flag)
