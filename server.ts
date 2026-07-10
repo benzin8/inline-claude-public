@@ -868,16 +868,15 @@ bot.command('ask', async ctx => {
   deliverChatTrigger(ctx.chat.id, ctx.message!.message_id, fromUser, query, ctx.chat.type)
 })
 
-bot.on('message:text', async ctx => {
-  const chat = ctx.chat // message:text implies a regular chat, never 'channel'
-  const fromUser = ctx.from
+// Shared by message:text AND message:caption (photo/video/document/etc. with a
+// caption) — a caption-only trigger ("Клод что за штаны на фото") is just as valid
+// as a plain text one, and was silently missed before this was factored out
+// (found live on 2026-07-10 right after fixing the word-boundary bug above).
+function maybeHandleChatMessage(chat: { id: number; type: string }, fromUser: { id: number; username?: string; is_bot?: boolean } | undefined, msgId: number, replyToMsgId: number | undefined, text: string): void {
   if (!fromUser || fromUser.is_bot) return
-  if (ctx.message.text.startsWith('/')) return // commands are handled separately above
+  if (text.startsWith('/')) return // commands are handled separately
 
-  const text = ctx.message.text
   const chatId = chat.id
-  const msgId = ctx.message.message_id
-  const replyToMsgId = ctx.message.reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
 
   if (chat.type === 'group' || chat.type === 'supergroup') {
@@ -886,12 +885,24 @@ bot.on('message:text', async ctx => {
     // @mention us — a plain "клод, ..." with no mention/reply never reaches this
     // handler at all (filtered server-side). Disable privacy mode via @BotFather
     // (/mybots → bot → Bot Settings → Group Privacy → Turn off) to receive every
-    // group message and let the phrase check below work like it does in business chats.
+    // group message and let the trigger-word check below work like in business chats.
     if (!hasTriggerWord(text) && !isReplyToUs) return
   }
-  // Private chat: any message is addressed to us, no mention/phrase needed.
+  // Private chat: any message is addressed to us, no mention/trigger word needed.
 
   deliverChatTrigger(chatId, msgId, fromUser, text.trim(), chat.type)
+}
+
+bot.on('message:text', async ctx => {
+  maybeHandleChatMessage(ctx.chat, ctx.from, ctx.message.message_id, ctx.message.reply_to_message?.message_id, ctx.message.text)
+})
+
+// Photo/video/document/etc. sent WITH a caption — e.g. "Клод что за штаны на фото".
+// Telegram delivers this as message:caption, a completely separate update shape from
+// message:text, and it was previously silently ignored by the chat feature (photos
+// without captions have nothing to trigger on, so those are intentionally skipped).
+bot.on('message:caption', async ctx => {
+  maybeHandleChatMessage(ctx.chat, ctx.from, ctx.message.message_id, ctx.message.reply_to_message?.message_id, ctx.message.caption ?? '')
 })
 
 // Log business_connection updates (to see can_reply flag)
