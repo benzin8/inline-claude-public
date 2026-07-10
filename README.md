@@ -164,6 +164,24 @@ Helper Python scripts for the userbot and media processing:
 
 ---
 
+## 🩺 Watchdog (optional, Windows)
+
+`watchdog.ps1` checks whether the server process (via `bot.pid`) is still alive and
+DMs the owner directly through the Bot API — no MCP/session involved, so it still
+works even if the whole ctg session (or just this MCP child process) silently dies.
+Alerts once per outage (not every run) and sends a recovery message once the process
+comes back.
+
+Register as a recurring Scheduled Task (every 5 min, survives reboots):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-ExecutionPolicy Bypass -WindowStyle Hidden -File "<path>\watchdog.ps1"'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+Register-ScheduledTask -TaskName "InlineClaudeWatchdog" -Action $action -Trigger $trigger -Description "Alerts owner via Telegram if the inline-claude MCP server process dies"
+```
+
+---
+
 ## 🏗️ Architecture
 
 ```
