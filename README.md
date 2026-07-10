@@ -157,6 +157,7 @@ Helper Python scripts for the userbot and media processing:
 | `get_biz_history.py <chat_id> [limit]` | Chat history from SQLite (includes cached contact info, if any) |
 | `get_contact_info.py <chat_id>` | Fetch a user's profile via the userbot, print as JSON (called automatically on first contact) |
 | `delete_message.py <target> <message_id>` | Delete a message the userbot sent (used automatically to clean up bridge-delivery messages) |
+| `userbot_daemon.py` | Persistent Telethon connection served over a local TCP socket (127.0.0.1:8765) — auto-started by the server so `send_message`/`get_contact_info`/`delete_message` are a fast local round-trip instead of a fresh Python+Telethon-auth process each time (1-3+s saved per call). Falls back to the one-shot scripts above automatically if unreachable. |
 | `transcribe_voice.py <file.oga> [lang]` | Transcribe a voice message (deletes file after) |
 | `get_photo.py <chat_id> [limit] [dir]` | Download the latest photo from a chat |
 | `read_chat.py <peer> [limit]` | Read the latest messages |
