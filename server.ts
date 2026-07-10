@@ -245,6 +245,15 @@ function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): bool
   return botSentMsgIds.get(chatId)?.has(replyToMsgId) ?? false
 }
 
+// Matches "клод"/"claude" as a standalone word ANYWHERE in the text, not just at the
+// start or immediately followed by a comma. The old `includes('клод,') ||
+// startsWith('клод ')` check missed completely natural phrasings like "Че Клод умер"
+// or "ало клод ты тут" — found live on 2026-07-10 (a real message went unanswered).
+const TRIGGER_WORD_RE = /(^|[^a-zа-яё])(клод|claude)([^a-zа-яё]|$)/i
+function hasTriggerWord(text: string): boolean {
+  return TRIGGER_WORD_RE.test(text)
+}
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -651,8 +660,7 @@ bot.on('business_message', async ctx => {
   const lower = text.toLowerCase()
   const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-  const triggerPhrase = lower.includes('клод,') || lower.startsWith('клод ') || lower.includes('claude,') || lower.startsWith('claude ')
-  if (!lower.includes('@claude_inline_bot') && !triggerPhrase && !isReplyToUs) {
+  if (!lower.includes('@claude_inline_bot') && !hasTriggerWord(text) && !isReplyToUs) {
     elog('  business_message: no trigger, skipping')
     return
   }
@@ -879,9 +887,7 @@ bot.on('message:text', async ctx => {
     // handler at all (filtered server-side). Disable privacy mode via @BotFather
     // (/mybots → bot → Bot Settings → Group Privacy → Turn off) to receive every
     // group message and let the phrase check below work like it does in business chats.
-    const lower = text.toLowerCase()
-    const phraseMatch = lower.includes('клод,') || lower.startsWith('клод ') || lower.includes('claude,') || lower.startsWith('claude ')
-    if (!phraseMatch && !isReplyToUs) return
+    if (!hasTriggerWord(text) && !isReplyToUs) return
   }
   // Private chat: any message is addressed to us, no mention/phrase needed.
 
