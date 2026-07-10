@@ -958,17 +958,35 @@ async function maybeHandleChatMessage(
   deliverChatTrigger(chatId, msgId, fromUser, text.trim() + marker, chat.type)
 }
 
+// Shared by the trigger message itself AND its reply target (same Message shape) —
+// e.g. someone sends a photo, then a SEPARATE later message replies to it with
+// "клод, что это" (no attachment of its own, but referring to the one above).
+type MsgLike = {
+  photo?: Array<{ file_id: string }>
+  voice?: { file_id: string }
+  video?: { file_id: string }
+  video_note?: { file_id: string }
+  sticker?: { file_id: string; is_animated?: boolean; is_video?: boolean; emoji?: string; set_name?: string }
+}
+function extractAttachment(m: MsgLike | undefined): ChatAttachment | undefined {
+  if (!m) return undefined
+  if (m.photo?.length) return { kind: 'photo', fileId: m.photo[m.photo.length - 1].file_id }
+  if (m.voice) return { kind: 'voice', fileId: m.voice.file_id }
+  if (m.video) return { kind: 'video', fileId: m.video.file_id }
+  if (m.video_note) return { kind: 'video_note', fileId: m.video_note.file_id }
+  if (m.sticker) return { kind: 'sticker', fileId: m.sticker.file_id, isAnimated: m.sticker.is_animated, isVideo: m.sticker.is_video, emoji: m.sticker.emoji, setName: m.sticker.set_name }
+  return undefined
+}
+
 bot.on('message', async ctx => {
   const m = ctx.message
   const text = m.text ?? m.caption ?? ''
   const replyToMsgId = m.reply_to_message?.message_id
 
-  let attachment: ChatAttachment | undefined
-  if (m.photo?.length) attachment = { kind: 'photo', fileId: m.photo[m.photo.length - 1].file_id }
-  else if (m.voice) attachment = { kind: 'voice', fileId: m.voice.file_id }
-  else if (m.video) attachment = { kind: 'video', fileId: m.video.file_id }
-  else if (m.video_note) attachment = { kind: 'video_note', fileId: m.video_note.file_id }
-  else if (m.sticker) attachment = { kind: 'sticker', fileId: m.sticker.file_id, isAnimated: m.sticker.is_animated, isVideo: m.sticker.is_video, emoji: m.sticker.emoji, setName: m.sticker.set_name }
+  // The message's OWN attachment wins; if it has none, fall back to whatever the
+  // message it's replying to was carrying — e.g. "клод, что это" replied onto an
+  // earlier bare photo.
+  const attachment = extractAttachment(m) ?? extractAttachment(m.reply_to_message)
 
   // Nothing to trigger on (no text/caption and no recognized attachment) — skip.
   if (!text && !attachment) return
