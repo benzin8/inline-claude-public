@@ -868,11 +868,47 @@ bot.command('ask', async ctx => {
   deliverChatTrigger(ctx.chat.id, ctx.message!.message_id, fromUser, query, ctx.chat.type)
 })
 
-// Shared by message:text AND message:caption (photo/video/document/etc. with a
-// caption) — a caption-only trigger ("Клод что за штаны на фото") is just as valid
-// as a plain text one, and was silently missed before this was factored out
-// (found live on 2026-07-10 right after fixing the word-boundary bug above).
-function maybeHandleChatMessage(chat: { id: number; type: string }, fromUser: { id: number; username?: string; is_bot?: boolean } | undefined, msgId: number, replyToMsgId: number | undefined, text: string): void {
+// Generic downloader shared by all chat-path attachment types below (photo/voice/
+// video/video_note/sticker). Mirrors the business_message download blocks further
+// up but with a fresh generated filename instead of biz_request_id, since the chat
+// path doesn't have a request id allocated until after gating passes.
+async function downloadTgFile(fileId: string, prefix: string, ext: string): Promise<string | undefined> {
+  try {
+    mkdirSync(join(HERE, 'tmp'), { recursive: true })
+    const fileInfo = await bot.api.getFile(fileId)
+    const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+    const resp = await fetch(url)
+    const buf = await resp.arrayBuffer()
+    const path = join(HERE, 'tmp', `${prefix}_${newId()}.${ext}`)
+    writeFileSync(path, Buffer.from(buf))
+    elog(`  ${prefix} saved: ${path}`)
+    return path
+  } catch (e) {
+    elog(`  ${prefix} download failed: ${e}`)
+    return undefined
+  }
+}
+
+type ChatAttachment =
+  | { kind: 'photo'; fileId: string }
+  | { kind: 'voice'; fileId: string }
+  | { kind: 'video'; fileId: string }
+  | { kind: 'video_note'; fileId: string }
+  | { kind: 'sticker'; fileId: string; isAnimated?: boolean; isVideo?: boolean; emoji?: string; setName?: string }
+
+// One handler for the whole 'message' update, inspecting fields directly, instead of
+// separate bot.on('message:photo')/('message:caption') registrations — grammY runs
+// EVERY matching bot.on() for a given update (each calls next() after its handler),
+// so a photo-with-caption would double-fire if handled by two overlapping filters.
+// A single dispatcher avoids that entirely.
+async function maybeHandleChatMessage(
+  chat: { id: number; type: string },
+  fromUser: { id: number; username?: string; is_bot?: boolean } | undefined,
+  msgId: number,
+  replyToMsgId: number | undefined,
+  text: string,
+  attachment?: ChatAttachment,
+): Promise<void> {
   if (!fromUser || fromUser.is_bot) return
   if (text.startsWith('/')) return // commands are handled separately
 
@@ -886,23 +922,58 @@ function maybeHandleChatMessage(chat: { id: number; type: string }, fromUser: { 
     // handler at all (filtered server-side). Disable privacy mode via @BotFather
     // (/mybots → bot → Bot Settings → Group Privacy → Turn off) to receive every
     // group message and let the trigger-word check below work like in business chats.
+    // Video notes/stickers can't carry a caption at all — reply-to-us is the only way
+    // to trigger on those in a group, same limitation as business chat кружки.
     if (!hasTriggerWord(text) && !isReplyToUs) return
   }
   // Private chat: any message is addressed to us, no mention/trigger word needed.
 
-  deliverChatTrigger(chatId, msgId, fromUser, text.trim(), chat.type)
+  let marker = ''
+  if (attachment) {
+    if (attachment.kind === 'photo') {
+      const p = await downloadTgFile(attachment.fileId, 'chat_photo', 'jpg')
+      if (p) marker = ` [PHOTO:${p}]`
+    } else if (attachment.kind === 'voice') {
+      const p = await downloadTgFile(attachment.fileId, 'chat_voice', 'oga')
+      if (p) marker = ` [VOICE:${p}]`
+    } else if (attachment.kind === 'video') {
+      const p = await downloadTgFile(attachment.fileId, 'chat_video', 'mp4')
+      if (p) marker = ` [VIDEO:${p}]`
+    } else if (attachment.kind === 'video_note') {
+      const p = await downloadTgFile(attachment.fileId, 'chat_videonote', 'mp4')
+      if (p) marker = ` [VIDEO_NOTE:${p}]`
+    } else if (attachment.kind === 'sticker') {
+      if (attachment.isAnimated) {
+        marker = ` [STICKER_INFO:animated sticker${attachment.emoji ? `, emoji=${attachment.emoji}` : ''}${attachment.setName ? `, set=${attachment.setName}` : ''} (no still frame available)]`
+      } else if (attachment.isVideo) {
+        const p = await downloadTgFile(attachment.fileId, 'chat_sticker', 'webm')
+        if (p) marker = ` [STICKER_VIDEO:${p}]`
+      } else {
+        const p = await downloadTgFile(attachment.fileId, 'chat_sticker', 'webp')
+        if (p) marker = ` [STICKER:${p}]`
+      }
+    }
+  }
+
+  deliverChatTrigger(chatId, msgId, fromUser, text.trim() + marker, chat.type)
 }
 
-bot.on('message:text', async ctx => {
-  maybeHandleChatMessage(ctx.chat, ctx.from, ctx.message.message_id, ctx.message.reply_to_message?.message_id, ctx.message.text)
-})
+bot.on('message', async ctx => {
+  const m = ctx.message
+  const text = m.text ?? m.caption ?? ''
+  const replyToMsgId = m.reply_to_message?.message_id
 
-// Photo/video/document/etc. sent WITH a caption — e.g. "Клод что за штаны на фото".
-// Telegram delivers this as message:caption, a completely separate update shape from
-// message:text, and it was previously silently ignored by the chat feature (photos
-// without captions have nothing to trigger on, so those are intentionally skipped).
-bot.on('message:caption', async ctx => {
-  maybeHandleChatMessage(ctx.chat, ctx.from, ctx.message.message_id, ctx.message.reply_to_message?.message_id, ctx.message.caption ?? '')
+  let attachment: ChatAttachment | undefined
+  if (m.photo?.length) attachment = { kind: 'photo', fileId: m.photo[m.photo.length - 1].file_id }
+  else if (m.voice) attachment = { kind: 'voice', fileId: m.voice.file_id }
+  else if (m.video) attachment = { kind: 'video', fileId: m.video.file_id }
+  else if (m.video_note) attachment = { kind: 'video_note', fileId: m.video_note.file_id }
+  else if (m.sticker) attachment = { kind: 'sticker', fileId: m.sticker.file_id, isAnimated: m.sticker.is_animated, isVideo: m.sticker.is_video, emoji: m.sticker.emoji, setName: m.sticker.set_name }
+
+  // Nothing to trigger on (no text/caption and no recognized attachment) — skip.
+  if (!text && !attachment) return
+
+  await maybeHandleChatMessage(ctx.chat, ctx.from, m.message_id, replyToMsgId, text, attachment)
 })
 
 // Log business_connection updates (to see can_reply flag)
