@@ -277,7 +277,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           biz_request_id: { type: 'string', description: 'biz_request_id from the [[biz:...]] bridge trigger' },
-          text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path is set' },
+          text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path is set. Not required if rich_markdown is set.' },
           photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
           reply_to: { type: 'boolean', description: 'if true, reply directly to the triggering message (quote-reply)' },
           buttons: {
@@ -290,8 +290,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ['owner', 'guest'],
             description: 'optional — restrict who may tap the buttons. If set, a tap from the other party is silently rejected (shown "это не тебе") and no trigger is delivered; the buttons stay live for the intended person.',
           },
+          rich_markdown: {
+            type: 'string',
+            description: 'optional — send as a Rich Message (Bot API 10.1+) instead of plain text, using GitHub-Flavored-Markdown-ish syntax: tables (| a | b |\\n|---|---|\\n| 1 | 2 |), # headings, - lists, > quotes, ```code```. When set, `text`/`buttons`/`photo_path` are ignored — this replaces the whole message. Use for structured data (comparison tables, breakdowns) that would be unreadable as plain text.',
+          },
         },
-        required: ['biz_request_id', 'text'],
+        required: ['biz_request_id'],
       },
     },
     {
@@ -329,9 +333,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           chat_request_id: { type: 'string', description: 'chat_request_id from the [[ic:chat:...]] bridge trigger' },
-          text: { type: 'string', description: 'the reply text (max ~4096 chars)' },
+          text: { type: 'string', description: 'the reply text (max ~4096 chars). Not required if rich_markdown is set.' },
+          rich_markdown: {
+            type: 'string',
+            description: 'optional — send as a Rich Message (Bot API 10.1+) instead of plain text, using GitHub-Flavored-Markdown-ish syntax: tables (| a | b |\\n|---|---|\\n| 1 | 2 |), # headings, - lists, > quotes, ```code```. When set, `text` is ignored. Use for structured data (comparison tables, breakdowns) that would be unreadable as plain text.',
+          },
         },
-        required: ['chat_request_id', 'text'],
+        required: ['chat_request_id'],
       },
     },
   ],
@@ -365,8 +373,32 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       let text = String(args.text ?? '')
       const photoPath = args.photo_path ? String(args.photo_path) : undefined
       const replyTo = Boolean(args.reply_to)
+      const richMarkdown = args.rich_markdown ? String(args.rich_markdown) : undefined
       const p = bizPending.get(biz_request_id)
       if (!p) throw new Error(`unknown or expired biz_request_id: ${biz_request_id}`)
+
+      if (richMarkdown) {
+        // Rich Message path (tables/headings/lists) — separate message type from plain
+        // text, can't edit a text placeholder into one, so drop the placeholder and send fresh.
+        if (p.placeholderMsgId) {
+          (bot.api.raw.deleteMessage as unknown as (params: Record<string, unknown>) => Promise<unknown>)({
+            business_connection_id: p.businessConnectionId, chat_id: p.chatId, message_id: p.placeholderMsgId,
+          }).catch(e => elog(`  placeholder delete failed: ${e}`))
+        }
+        const sentRich = await (bot.api as unknown as { raw: { sendRichMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendRichMessage({
+          business_connection_id: p.businessConnectionId,
+          chat_id: p.chatId,
+          rich_message: { markdown: richMarkdown },
+          reply_parameters: { message_id: p.messageId },
+        })
+        if (sentRich?.message_id) trackSentMsg(p.chatId, sentRich.message_id)
+        bizPending.delete(biz_request_id)
+        cleanupBridgeMsg(`biz:${biz_request_id}`)
+        saveMessage(String(p.chatId), 'assistant', richMarkdown)
+        elog(`business_reply RICH OK biz_request_id=${biz_request_id} len=${richMarkdown.length}`)
+        return { content: [{ type: 'text', text: `replied (rich) in business chat (request ${biz_request_id})` }] }
+      }
+
       const bizEmoji = '<tg-emoji emoji-id="5368635272332352173">🎉</tg-emoji> '
       const escHtmlBiz = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       const bizText = bizEmoji + escHtmlBiz(text)
@@ -488,8 +520,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     if (req.params.name === 'chat_reply') {
       const chat_request_id = String(args.chat_request_id)
       let text = String(args.text ?? '')
+      const richMarkdown = args.rich_markdown ? String(args.rich_markdown) : undefined
       const p = chatPending.get(chat_request_id)
       if (!p) throw new Error(`unknown or expired chat_request_id: ${chat_request_id}`)
+
+      if (richMarkdown) {
+        if (p.placeholderMsgId) {
+          await bot.api.deleteMessage(p.chatId, p.placeholderMsgId).catch(e => elog(`  chat placeholder delete failed: ${e}`))
+        }
+        const sentRich = await (bot.api as unknown as { raw: { sendRichMessage: (params: Record<string, unknown>) => Promise<{ message_id: number }> } }).raw.sendRichMessage({
+          chat_id: p.chatId,
+          rich_message: { markdown: richMarkdown },
+          reply_parameters: { message_id: p.messageId },
+        })
+        if (sentRich?.message_id) trackSentMsg(p.chatId, sentRich.message_id)
+        chatPending.delete(chat_request_id)
+        cleanupBridgeMsg(`chat:${chat_request_id}`)
+        elog(`chat_reply RICH OK chat_request_id=${chat_request_id} len=${richMarkdown.length}`)
+        return { content: [{ type: 'text', text: `replied (rich) in chat (request ${chat_request_id})` }] }
+      }
+
       if (text.length > 4096) text = text.slice(0, 4090) + '…'
       let sentMsgId: number | undefined
       if (p.placeholderMsgId) {
