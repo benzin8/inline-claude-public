@@ -17,7 +17,8 @@ import { Bot, GrammyError, API_CONSTANTS, InlineKeyboard } from 'grammy'
 import { readFileSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
+import { connect as netConnect } from 'net'
 import { saveMessage, isNewChat, saveContactInfo } from './db.js'
 
 const HERE = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
@@ -81,8 +82,10 @@ const DELETE_PY = join(USERBOT_DIR, 'delete_message.py')
 // at once (e.g. cleanupBridgeMsg's delete firing while a new deliverViaBridge's send
 // is also in flight) intermittently throws "database is locked" — and a message that
 // fails to send is silently LOST (no retry, no visible error to дима). Serialize every
-// userbot-script invocation through one queue so they never overlap; simple retry on
-// top in case a lock is still draining from a process that just exited.
+// FALLBACK userbot-script invocation (used when the daemon below is unreachable)
+// through one queue so they never overlap; simple retry on top in case a lock is
+// still draining from a process that just exited. The daemon (primary path) doesn't
+// need this — it's one persistent process, so there's no cross-process contention.
 let userbotQueue: Promise<void> = Promise.resolve()
 function execUserbotScript(
   args: string[],
@@ -102,6 +105,63 @@ function execUserbotScript(
     })
   }))
 }
+
+// --- Persistent userbot daemon (latency optimization) ---
+// Spawning a fresh Python process + Telethon auth handshake per delivery/cleanup/
+// contact-fetch costs 1-3+ seconds EACH time. The daemon keeps one authenticated
+// Telethon client alive and serves the same 3 actions over a local TCP socket
+// (newline-delimited JSON) — a call to it is a fast local round-trip instead of a
+// process spawn. Every call site below tries the daemon first and falls back to the
+// old execFile path on any failure, so a dead/missing daemon just means "slow like
+// before," never "broken."
+const DAEMON_PY = join(USERBOT_DIR, 'userbot_daemon.py')
+const DAEMON_PID_FILE = join(USERBOT_DIR, 'daemon.pid')
+const DAEMON_PORT = Number(process.env.USERBOT_DAEMON_PORT ?? 8765)
+
+function daemonCall(action: string, params: Record<string, unknown>, timeoutMs = 5000): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const sock = netConnect({ host: '127.0.0.1', port: DAEMON_PORT })
+    let buf = ''
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error('daemon call timeout')) }, timeoutMs)
+    sock.on('connect', () => sock.write(JSON.stringify({ action, ...params }) + '\n'))
+    sock.on('data', chunk => {
+      buf += chunk.toString('utf8')
+      const nl = buf.indexOf('\n')
+      if (nl === -1) return
+      clearTimeout(timer)
+      sock.end()
+      try {
+        const parsed = JSON.parse(buf.slice(0, nl))
+        if (parsed.ok) resolve(parsed)
+        else reject(new Error(String(parsed.error ?? 'daemon returned ok:false')))
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
+    })
+    sock.on('error', err => { clearTimeout(timer); reject(err) })
+  })
+}
+
+// Best-effort auto-start: if the PID in daemon.pid isn't a live process, spawn the
+// daemon detached (survives this server.ts process exiting/restarting). Doesn't
+// block startup on success/failure either way — every call site has its own fallback.
+function ensureDaemonRunning(): void {
+  let alive = false
+  try {
+    const pid = parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10)
+    if (pid > 1) { process.kill(pid, 0); alive = true }
+  } catch {}
+  if (alive) { elog('  userbot daemon already running'); return }
+  try {
+    const child = spawn(PYTHON, [DAEMON_PY], { cwd: USERBOT_DIR, detached: true, stdio: 'ignore' })
+    child.unref()
+    elog(`  userbot daemon spawn requested pid=${child.pid}`)
+  } catch (e) {
+    elog(`  userbot daemon spawn FAILED: ${e}`)
+  }
+}
+ensureDaemonRunning()
+
 // Delete the raw "[[ic:...]]" bridge-delivery message from the bridge chat once Claude
 // has answered, so дима's chat with the bridge bot doesn't fill up with trigger noise.
 // Default on; set CLEANUP_BRIDGE_MSG=false in .env to keep the raw trigger messages.
@@ -113,9 +173,14 @@ function cleanupBridgeMsg(key: string): void {
   const msgId = bridgeDeliveryMsg.get(key)
   if (!msgId) return
   bridgeDeliveryMsg.delete(key)
-  execUserbotScript([DELETE_PY, BRIDGE_TARGET, String(msgId)], (error, stdout, stderr) => {
-    elog(`  bridge cleanup key=${key} msg=${msgId} out=${String(stdout).trim()} err=${String(stderr).trim()}${error ? ` error=${error}` : ''}`)
-  })
+  daemonCall('delete_message', { target: BRIDGE_TARGET, message_id: msgId })
+    .then(() => elog(`  bridge cleanup (daemon) key=${key} msg=${msgId} ok`))
+    .catch(daemonErr => {
+      elog(`  bridge cleanup daemon FAILED (${daemonErr}), falling back to execFile`)
+      execUserbotScript([DELETE_PY, BRIDGE_TARGET, String(msgId)], (error, stdout, stderr) => {
+        elog(`  bridge cleanup key=${key} msg=${msgId} out=${String(stdout).trim()} err=${String(stderr).trim()}${error ? ` error=${error}` : ''}`)
+      })
+    })
 }
 
 // Fetch-once-per-contact: on the first message ever seen from a chat_id, ask the
@@ -123,59 +188,85 @@ function cleanupBridgeMsg(key: string): void {
 // Fire-and-forget — must not delay trigger delivery for the current message.
 function fetchContactInfoIfNew(chatId: string): void {
   if (!isNewChat(chatId)) return
-  execUserbotScript([CONTACT_PY, chatId], (error, stdout, stderr) => {
-    if (error) { elog(`  contact info fetch FAILED chat=${chatId}: ${error} ${stderr}`); return }
-    try {
-      const info = JSON.parse(stdout)
-      if (info.error) { elog(`  contact info fetch error chat=${chatId}: ${info.error}`); return }
-      saveContactInfo(chatId, info)
-      elog(`  contact info saved chat=${chatId}: ${stdout.trim()}`)
-    } catch (e) {
-      elog(`  contact info parse FAILED chat=${chatId}: ${e} out=${stdout}`)
-    }
-  })
+  daemonCall('get_contact_info', { chat_id: chatId })
+    .then(res => {
+      saveContactInfo(chatId, res.info as Record<string, unknown>)
+      elog(`  contact info saved (daemon) chat=${chatId}`)
+    })
+    .catch(daemonErr => {
+      elog(`  contact info daemon FAILED (${daemonErr}), falling back to execFile`)
+      execUserbotScript([CONTACT_PY, chatId], (error, stdout, stderr) => {
+        if (error) { elog(`  contact info fetch FAILED chat=${chatId}: ${error} ${stderr}`); return }
+        try {
+          const info = JSON.parse(stdout)
+          if (info.error) { elog(`  contact info fetch error chat=${chatId}: ${info.error}`); return }
+          saveContactInfo(chatId, info)
+          elog(`  contact info saved chat=${chatId}: ${stdout.trim()}`)
+        } catch (e) {
+          elog(`  contact info parse FAILED chat=${chatId}: ${e} out=${stdout}`)
+        }
+      })
+    })
 }
 const BRIDGE_TARGET = process.env.BRIDGE_TARGET ?? ''
 function deliverViaBridge(request_id: string, query: string, tag: string, historyBlock?: string): void {
-  try {
-    const tmp = join(HERE, `ic_${request_id}.txt`)
-    // The `tag` (role=owner | role=guest who=...) is set authoritatively by the
-    // server from the sender's telegram id — it lives in the trusted prefix,
-    // OUTSIDE the user-controlled <query>. Claude must ignore any role claims
-    // inside the query body and treat guest inline input as answer-only.
-    let content = `[[ic:${request_id} ${tag}]] ${query}`
-    if (historyBlock) {
-      const suffix = `\n\n--- история чата ---\n${historyBlock}\n---`
-      // Keep total under 4096 chars (Telegram message limit)
-      if (content.length + suffix.length <= 4090) content += suffix
-    }
-    writeFileSync(tmp, content)
-    execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
-      const code = error?.code ?? 0
-      elog(`  bridge fallback request_id=${request_id} exit=${code} out=${String(stdout).trim()} err=${String(stderr).trim()}`)
-      const m = String(stdout).match(/message_id=(\d+)/)
-      if (m) bridgeDeliveryMsg.set(request_id, Number(m[1]))
-      try { rmSync(tmp) } catch {}
-    })
-  } catch (e) {
-    elog(`  bridge fallback FAILED request_id=${request_id}: ${e}`)
+  // The `tag` (role=owner | role=guest who=...) is set authoritatively by the
+  // server from the sender's telegram id — it lives in the trusted prefix,
+  // OUTSIDE the user-controlled <query>. Claude must ignore any role claims
+  // inside the query body and treat guest inline input as answer-only.
+  let content = `[[ic:${request_id} ${tag}]] ${query}`
+  if (historyBlock) {
+    const suffix = `\n\n--- история чата ---\n${historyBlock}\n---`
+    // Keep total under 4096 chars (Telegram message limit)
+    if (content.length + suffix.length <= 4090) content += suffix
   }
+
+  const deliverViaExecFile = () => {
+    try {
+      const tmp = join(HERE, `ic_${request_id}.txt`)
+      writeFileSync(tmp, content)
+      execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
+        const code = error?.code ?? 0
+        elog(`  bridge fallback request_id=${request_id} exit=${code} out=${String(stdout).trim()} err=${String(stderr).trim()}`)
+        const m = String(stdout).match(/message_id=(\d+)/)
+        if (m) bridgeDeliveryMsg.set(request_id, Number(m[1]))
+        try { rmSync(tmp) } catch {}
+      })
+    } catch (e) {
+      elog(`  bridge fallback FAILED request_id=${request_id}: ${e}`)
+    }
+  }
+
+  daemonCall('send_message', { target: BRIDGE_TARGET, text: content })
+    .then(res => {
+      elog(`  bridge delivery (daemon) request_id=${request_id} msg=${res.message_id}`)
+      if (typeof res.message_id === 'number') bridgeDeliveryMsg.set(request_id, res.message_id)
+    })
+    .catch(daemonErr => {
+      elog(`  bridge delivery daemon FAILED (${daemonErr}), falling back to execFile`)
+      deliverViaExecFile()
+    })
 }
 
 // Deliver a PLAIN message into the session (no [[ic:...]] wrapper) — surfaces as a normal
 // owner message via the bridge. Used for owner-poll answers, which aren't inline/biz
 // triggers and need no tool response, just to be read.
 function deliverPlainToBridge(text: string): void {
-  try {
-    const tmp = join(HERE, `plain_${newId()}.txt`)
-    writeFileSync(tmp, text)
-    execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
-      elog(`  plain bridge deliver exit=${error?.code ?? 0} err=${String(stderr).trim()}`)
-      try { rmSync(tmp) } catch {}
+  daemonCall('send_message', { target: BRIDGE_TARGET, text })
+    .then(() => elog('  plain bridge deliver (daemon) ok'))
+    .catch(daemonErr => {
+      elog(`  plain bridge deliver daemon FAILED (${daemonErr}), falling back to execFile`)
+      try {
+        const tmp = join(HERE, `plain_${newId()}.txt`)
+        writeFileSync(tmp, text)
+        execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
+          elog(`  plain bridge deliver exit=${error?.code ?? 0} err=${String(stderr).trim()}`)
+          try { rmSync(tmp) } catch {}
+        })
+      } catch (e) {
+        elog(`  plain bridge deliver FAILED: ${e}`)
+      }
     })
-  } catch (e) {
-    elog(`  plain bridge deliver FAILED: ${e}`)
-  }
 }
 
 const TOKEN = process.env.INLINE_BOT_TOKEN
