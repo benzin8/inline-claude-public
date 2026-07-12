@@ -75,6 +75,33 @@ const USERBOT_DIR = process.env.INLINE_USERBOT_DIR ?? join(homedir(), '.claude',
 const SEND_PY = join(USERBOT_DIR, 'send_message.py')
 const CONTACT_PY = join(USERBOT_DIR, 'get_contact_info.py')
 const DELETE_PY = join(USERBOT_DIR, 'delete_message.py')
+
+// send_message.py / delete_message.py / get_contact_info.py each open their own
+// Telethon connection to the SAME userbot.session SQLite file. Two of them running
+// at once (e.g. cleanupBridgeMsg's delete firing while a new deliverViaBridge's send
+// is also in flight) intermittently throws "database is locked" — and a message that
+// fails to send is silently LOST (no retry, no visible error to дима). Serialize every
+// userbot-script invocation through one queue so they never overlap; simple retry on
+// top in case a lock is still draining from a process that just exited.
+let userbotQueue: Promise<void> = Promise.resolve()
+function execUserbotScript(
+  args: string[],
+  callback: (error: import('child_process').ExecFileException | null, stdout: string, stderr: string) => void,
+  attempt = 1,
+): void {
+  userbotQueue = userbotQueue.then(() => new Promise<void>(resolve => {
+    execFile(PYTHON, args, { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+      const locked = /database is locked/i.test(String(stderr))
+      if (locked && attempt < 3) {
+        elog(`  userbot script locked (attempt ${attempt}), retrying: ${args.join(' ')}`)
+        resolve() // release the queue slot, then re-enqueue as a fresh call after a short delay
+        setTimeout(() => execUserbotScript(args, callback, attempt + 1), 400 * attempt)
+        return
+      }
+      try { callback(error, stdout, stderr) } finally { resolve() }
+    })
+  }))
+}
 // Delete the raw "[[ic:...]]" bridge-delivery message from the bridge chat once Claude
 // has answered, so дима's chat with the bridge bot doesn't fill up with trigger noise.
 // Default on; set CLEANUP_BRIDGE_MSG=false in .env to keep the raw trigger messages.
@@ -86,7 +113,7 @@ function cleanupBridgeMsg(key: string): void {
   const msgId = bridgeDeliveryMsg.get(key)
   if (!msgId) return
   bridgeDeliveryMsg.delete(key)
-  execFile(PYTHON, [DELETE_PY, BRIDGE_TARGET, String(msgId)], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+  execUserbotScript([DELETE_PY, BRIDGE_TARGET, String(msgId)], (error, stdout, stderr) => {
     elog(`  bridge cleanup key=${key} msg=${msgId} out=${String(stdout).trim()} err=${String(stderr).trim()}${error ? ` error=${error}` : ''}`)
   })
 }
@@ -96,7 +123,7 @@ function cleanupBridgeMsg(key: string): void {
 // Fire-and-forget — must not delay trigger delivery for the current message.
 function fetchContactInfoIfNew(chatId: string): void {
   if (!isNewChat(chatId)) return
-  execFile(PYTHON, [CONTACT_PY, chatId], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+  execUserbotScript([CONTACT_PY, chatId], (error, stdout, stderr) => {
     if (error) { elog(`  contact info fetch FAILED chat=${chatId}: ${error} ${stderr}`); return }
     try {
       const info = JSON.parse(stdout)
@@ -123,7 +150,7 @@ function deliverViaBridge(request_id: string, query: string, tag: string, histor
       if (content.length + suffix.length <= 4090) content += suffix
     }
     writeFileSync(tmp, content)
-    execFile(PYTHON, [SEND_PY, BRIDGE_TARGET, tmp], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+    execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
       const code = error?.code ?? 0
       elog(`  bridge fallback request_id=${request_id} exit=${code} out=${String(stdout).trim()} err=${String(stderr).trim()}`)
       const m = String(stdout).match(/message_id=(\d+)/)
@@ -142,7 +169,7 @@ function deliverPlainToBridge(text: string): void {
   try {
     const tmp = join(HERE, `plain_${newId()}.txt`)
     writeFileSync(tmp, text)
-    execFile(PYTHON, [SEND_PY, BRIDGE_TARGET, tmp], { cwd: USERBOT_DIR }, (error, stdout, stderr) => {
+    execUserbotScript([SEND_PY, BRIDGE_TARGET, tmp], (error, stdout, stderr) => {
       elog(`  plain bridge deliver exit=${error?.code ?? 0} err=${String(stderr).trim()}`)
       try { rmSync(tmp) } catch {}
     })
