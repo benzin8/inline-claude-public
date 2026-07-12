@@ -460,6 +460,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_request_id'],
       },
     },
+    {
+      name: 'chat_send',
+      description:
+        'Send a NEW, unprompted message directly to a chat_id that has messaged the inline-claude bot (@claude_inline_bot) before — a follow-up not tied to a specific incoming trigger, e.g. sharing a link/file after the triggering conversation already ended. Use chat_reply instead when answering a specific incoming [[ic:chat:...]] trigger. Telegram requires the recipient to have started/messaged the bot first — this will fail otherwise.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'the chat_id (numeric, as string) that has messaged the bot before' },
+          text: { type: 'string', description: 'the message text (max ~4096 chars)' },
+        },
+        required: ['chat_id', 'text'],
+      },
+    },
   ],
 }))
 
@@ -672,6 +685,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       cleanupBridgeMsg(`chat:${chat_request_id}`)
       elog(`chat_reply OK chat_request_id=${chat_request_id} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in chat (request ${chat_request_id})` }] }
+    }
+    if (req.params.name === 'chat_send') {
+      const chatIdNum = Number(args.chat_id)
+      let text = String(args.text ?? '')
+      if (text.length > 4096) text = text.slice(0, 4090) + '…'
+      const sent = await bot.api.sendMessage(chatIdNum, text)
+      trackSentMsg(chatIdNum, sent.message_id)
+      elog(`chat_send OK chat=${chatIdNum} len=${text.length}`)
+      return { content: [{ type: 'text', text: `sent to chat ${chatIdNum}` }] }
     }
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
   } catch (err) {
