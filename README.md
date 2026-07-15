@@ -129,7 +129,7 @@ business_reply() ──▶ message is sent to the contact on your behalf
 ```
 
 **Business bot triggers** — the bot fires when a message:
-- contains a keyword (`claude,` / `клод,`) or starts with it
+- starts with a keyword (`claude` / `клод`)
 - mentions the bot (`@your_bot`)
 - is a reply to any of the bot's own messages (no mention needed)
 

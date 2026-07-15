@@ -363,11 +363,13 @@ function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): bool
   return botSentMsgIds.get(chatId)?.has(replyToMsgId) ?? false
 }
 
-// Matches "клод"/"claude" as a standalone word ANYWHERE in the text, not just at the
-// start or immediately followed by a comma. The old `includes('клод,') ||
-// startsWith('клод ')` check missed completely natural phrasings like "Че Клод умер"
-// or "ало клод ты тут" — found live on 2026-07-10 (a real message went unanswered).
-const TRIGGER_WORD_RE = /(^|[^a-zа-яё])(клод|claude)([^a-zа-яё]|$)/i
+// Matches "клод"/"claude" only at the very start of the message (leading whitespace
+// ignored). Reverted from an anywhere-in-text match on 2026-07-15 — that broader version
+// (added 2026-07-10 to catch phrasings like "ало клод ты тут") started false-triggering
+// on ordinary conversation that just happened to mention "клод" mid-sentence without
+// actually addressing the bot (e.g. a business chat discussing an unrelated bug that
+// mentioned Claude by name). Explicit start-of-message keeps that intentional.
+const TRIGGER_WORD_RE = /^\s*(клод|claude)\b/i
 function hasTriggerWord(text: string): boolean {
   return TRIGGER_WORD_RE.test(text)
 }
