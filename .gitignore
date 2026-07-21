@@ -10,3 +10,4 @@ tmp/
 bun.lock
 watchdog.log
 watchdog_alerted.flag
+agents/

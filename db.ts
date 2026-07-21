@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { join } from 'path'
 import { homedir } from 'os'
 import { mkdirSync } from 'fs'
+import { randomUUID } from 'crypto'
 
 const DATA_DIR = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
 mkdirSync(DATA_DIR, { recursive: true })
@@ -68,6 +69,9 @@ const insertStmt = db.prepare(
 const historyStmt = db.prepare(
   `SELECT role, sender_name, text FROM chat_history WHERE chat_id = ? ORDER BY ts DESC LIMIT ?`,
 )
+const agentMsgsStmt = db.prepare(
+  `SELECT role, sender_name, text FROM chat_history WHERE agent_id = ? ORDER BY ts DESC LIMIT ?`,
+)
 const countStmt = db.prepare(`SELECT COUNT(*) as n FROM chat_history WHERE chat_id = ?`)
 const contactUpsertStmt = db.prepare(`INSERT INTO contacts
   (chat_id, first_name, last_name, username, phone, about, is_contact, premium, common_chats_count, fetched_at)
@@ -77,6 +81,92 @@ const contactUpsertStmt = db.prepare(`INSERT INTO contacts
     phone=excluded.phone, about=excluded.about, is_contact=excluded.is_contact,
     premium=excluded.premium, common_chats_count=excluded.common_chats_count, fetched_at=excluded.fetched_at`)
 const contactStmt = db.prepare(`SELECT * FROM contacts WHERE chat_id = ?`)
+
+// --- Per-chat Claude-Code agent sessions (subscription-based headless agents) --
+// Maps agent_id (== chat_id) to a stable Claude Code session UUID we control via
+// `claude -p --session-id <uuid>` (first turn) / `--resume <uuid>` (later turns).
+// Capped at INLINE_MAX_AGENTS (default 5) with LRU eviction — дима only needs a
+// handful of long-lived agents, and each draws from the subscription's headless pool.
+db.exec(`CREATE TABLE IF NOT EXISTS claude_agents (
+  agent_id TEXT PRIMARY KEY,
+  session_uuid TEXT NOT NULL,
+  initialized INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_used INTEGER NOT NULL
+)`)
+const MAX_AGENTS = Number(process.env.INLINE_MAX_AGENTS ?? 10)
+const agentGetStmt = db.prepare(`SELECT session_uuid, initialized FROM claude_agents WHERE agent_id = ?`)
+const agentCountStmt = db.prepare(`SELECT COUNT(*) AS n FROM claude_agents`)
+const agentLruStmt = db.prepare(`SELECT agent_id FROM claude_agents ORDER BY last_used ASC LIMIT ?`)
+const agentDelStmt = db.prepare(`DELETE FROM claude_agents WHERE agent_id = ?`)
+const agentInsStmt = db.prepare(
+  `INSERT INTO claude_agents (agent_id, session_uuid, initialized, created_at, last_used) VALUES (?, ?, 0, ?, ?)`,
+)
+const agentTouchStmt = db.prepare(`UPDATE claude_agents SET last_used = ? WHERE agent_id = ?`)
+const agentInitStmt = db.prepare(`UPDATE claude_agents SET initialized = 1 WHERE agent_id = ?`)
+const agentListStmt = db.prepare(
+  `SELECT agent_id, session_uuid, initialized, last_used FROM claude_agents ORDER BY last_used DESC`,
+)
+
+export interface AgentSlot {
+  agentId: string
+  sessionUuid: string
+  initialized: boolean
+  evicted: string[] // agent_ids dropped by LRU to make room (empty unless a new agent was created)
+}
+
+/** Get (or create, with LRU eviction) the Claude-Code session slot for a chat.
+ *  Touches last_used so the freshest chats survive eviction. */
+export function getAgentSlot(agentId: string): AgentSlot {
+  const now = Date.now()
+  const row = agentGetStmt.get(agentId) as { session_uuid: string; initialized: number } | undefined
+  if (row) {
+    agentTouchStmt.run(now, agentId)
+    return { agentId, sessionUuid: row.session_uuid, initialized: !!row.initialized, evicted: [] }
+  }
+  const evicted: string[] = []
+  const count = (agentCountStmt.get() as { n: number }).n
+  if (count >= MAX_AGENTS) {
+    const victims = agentLruStmt.all(count - MAX_AGENTS + 1) as Array<{ agent_id: string }>
+    for (const v of victims) {
+      agentDelStmt.run(v.agent_id)
+      evicted.push(v.agent_id)
+    }
+  }
+  const uuid = randomUUID()
+  agentInsStmt.run(agentId, uuid, now, now)
+  return { agentId, sessionUuid: uuid, initialized: false, evicted }
+}
+
+export function markAgentInitialized(agentId: string): void {
+  agentInitStmt.run(agentId)
+}
+
+// Persisted record of message ids WE (bot/agent) sent per chat, so a reply to one of our
+// messages still triggers a response after a server restart (the in-memory set is wiped on
+// restart). Keeps reply-to-agent triggering reliable for agent-handled chats.
+db.exec(`CREATE TABLE IF NOT EXISTS bot_messages (
+  chat_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+)`)
+const botMsgInsStmt = db.prepare(`INSERT OR IGNORE INTO bot_messages (chat_id, message_id, ts) VALUES (?, ?, ?)`)
+const botMsgHasStmt = db.prepare(`SELECT 1 FROM bot_messages WHERE chat_id = ? AND message_id = ? LIMIT 1`)
+
+export function trackBotMessage(chatId: string, messageId: number): void {
+  botMsgInsStmt.run(chatId, messageId, Date.now())
+}
+
+export function isBotMessage(chatId: string, messageId: number): boolean {
+  return botMsgHasStmt.get(chatId, messageId) !== undefined
+}
+
+export function listAgents(): Array<{ agentId: string; sessionUuid: string; initialized: boolean; lastUsed: number }> {
+  return (agentListStmt.all() as Array<{ agent_id: string; session_uuid: string; initialized: number; last_used: number }>).map(
+    r => ({ agentId: r.agent_id, sessionUuid: r.session_uuid, initialized: !!r.initialized, lastUsed: r.last_used }),
+  )
+}
 
 export function saveMessage(
   chatId: string,
@@ -136,6 +226,30 @@ export function getHistory(chatId: string, limit = 20): string {
       return `[${who}]: ${truncated}`
     })
     .join('\n')
+}
+
+/** One turn of an agent's own conversation, oldest-first, for building an API request.
+ *  Scoped to a SINGLE agent_id — this is the isolation boundary: an agent reads only
+ *  its own chat's rows. Cross-agent reads must go through hasAccess() + a separate call. */
+export interface AgentMessage {
+  role: 'user' | 'assistant'
+  senderName: string | null
+  text: string
+}
+
+export function getAgentMessages(agentId: string, limit = 40): AgentMessage[] {
+  const rows = agentMsgsStmt.all(agentId, limit) as Array<{
+    role: string
+    sender_name: string | null
+    text: string
+  }>
+  return rows
+    .reverse()
+    .map(r => ({
+      role: r.role === 'assistant' ? 'assistant' : ('user' as 'user' | 'assistant'),
+      senderName: r.sender_name,
+      text: r.text,
+    }))
 }
 
 // --- Cross-agent access grants (owner-gated) ---------------------------------

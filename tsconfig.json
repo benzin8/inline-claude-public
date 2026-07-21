@@ -12,5 +12,5 @@
     "sourceMap": false,
     "resolveJsonModule": true
   },
-  "include": ["server.ts", "db.ts", "cli.ts"]
+  "include": ["server.ts", "db.ts", "cli.ts", "claude-agent.ts"]
 }

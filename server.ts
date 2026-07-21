@@ -19,7 +19,8 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { execFile, spawn } from 'child_process'
 import { connect as netConnect } from 'net'
-import { saveMessage, isNewChat, saveContactInfo } from './db.js'
+import { saveMessage, isNewChat, saveContactInfo, trackBotMessage, isBotMessage } from './db.js'
+import { runAgent } from './claude-agent.js'
 
 const HERE = process.env.INLINE_DATA_DIR ?? join(homedir(), '.claude', 'inline-bot')
 mkdirSync(HERE, { recursive: true })
@@ -272,6 +273,17 @@ function deliverPlainToBridge(text: string): void {
 const TOKEN = process.env.INLINE_BOT_TOKEN
 const OWNER_ID = process.env.OWNER_ID // owner's telegram user id, as string
 
+// Business chats handled ENTIRELY by their own per-chat Claude-Code agent (server-side),
+// with NO bridge round-trip to the ctg session. Comma-separated chat_ids in INLINE_AGENT_CHATS.
+// A message from one of these chats is answered directly by runAgent → business reply,
+// deterministically and without waiting for the ctg session to pick it up.
+const AGENT_CHATS = new Set(
+  String(process.env.INLINE_AGENT_CHATS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+)
+
 // Who may USE the inline bot. OWNER_ID is always allowed; extra ids can be
 // granted via INLINE_ALLOW_IDS env var (comma-separated telegram user ids).
 // This is Q&A access only — NOT operator access to the machine.
@@ -357,10 +369,14 @@ function trackSentMsg(chatId: number, messageId: number): void {
     const oldest = s.values().next().value
     if (oldest !== undefined) s.delete(oldest)
   }
+  // Also persist so reply-to-our-message triggers survive a server restart.
+  try { trackBotMessage(String(chatId), messageId) } catch { /* non-fatal */ }
 }
 function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): boolean {
   if (!replyToMsgId) return false
-  return botSentMsgIds.get(chatId)?.has(replyToMsgId) ?? false
+  if (botSentMsgIds.get(chatId)?.has(replyToMsgId)) return true
+  // Fall back to the persisted record (survives restarts).
+  try { return isBotMessage(String(chatId), replyToMsgId) } catch { return false }
 }
 
 // Matches "клод"/"claude" only at the very start of the message (leading whitespace
@@ -880,6 +896,64 @@ bot.on('business_message', async ctx => {
 
   // Strip the bot mention to get the clean question
   const query = text.replace(/@claude_inline_bot/gi, '').trim() || text.trim()
+
+  // --- Agent-handled chats: answer server-side, no bridge / no ctg session ------------
+  // The chat's own Claude-Code agent runs right here and the reply goes straight back over
+  // the business connection. Deterministic and instant — the message is never queued behind
+  // the ctg session. Owner (дима) gets tools; the counterpart is treated as a guest (no tools).
+  if (AGENT_CHATS.has(chatIdStr)) {
+    const role: 'owner' | 'guest' = String(msg.from?.id) === OWNER_ID ? 'owner' : 'guest'
+    const rawApi = bot.api as unknown as {
+      raw: {
+        sendMessage: (p: Record<string, unknown>) => Promise<{ message_id: number }>
+        editMessageText: (p: Record<string, unknown>) => Promise<unknown>
+      }
+    }
+    const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const bizEmoji = '<tg-emoji emoji-id="5368635272332352173">🎉</tg-emoji> ' // same premium prefix as business_reply
+    let phId: number | undefined
+    try {
+      const ph = await rawApi.raw.sendMessage({
+        business_connection_id: connId,
+        chat_id: chatId,
+        text: '<tg-emoji emoji-id="5368808376694248152">💬</tg-emoji> Думаю...',
+        parse_mode: 'HTML',
+        reply_parameters: { message_id: msg.message_id },
+      })
+      phId = ph?.message_id
+      if (phId) trackSentMsg(chatId, phId)
+    } catch (e) {
+      elog(`  agent placeholder failed: ${e}`)
+    }
+    try {
+      const res = await runAgent({
+        agentId: chatIdStr,
+        chatId: chatIdStr,
+        text: query,
+        senderName: msg.from?.first_name ?? undefined,
+        role,
+        kind: 'biz',
+        userId: msg.from?.id != null ? String(msg.from.id) : undefined,
+      })
+      const outText = bizEmoji + (escHtml(res.text).slice(0, 4080) || '(пустой ответ)')
+      if (phId) {
+        await rawApi.raw
+          .editMessageText({ business_connection_id: connId, chat_id: chatId, message_id: phId, text: outText, parse_mode: 'HTML' })
+          .catch(async () => {
+            const sent = await rawApi.raw.sendMessage({ business_connection_id: connId, chat_id: chatId, text: outText, parse_mode: 'HTML' })
+            if (sent?.message_id) trackSentMsg(chatId, sent.message_id)
+          })
+      } else {
+        const sent = await rawApi.raw.sendMessage({ business_connection_id: connId, chat_id: chatId, text: outText, parse_mode: 'HTML' })
+        if (sent?.message_id) trackSentMsg(chatId, sent.message_id)
+      }
+      elog(`  agent-handled chat ${chatIdStr} replied (${res.durationMs}ms, role=${role})`)
+    } catch (e) {
+      elog(`  agent run failed for ${chatIdStr}: ${e}`)
+    }
+    return // do NOT fall through to the bridge/ctg flow
+  }
+
   const biz_request_id = newId()
   bizPending.set(biz_request_id, { businessConnectionId: connId, chatId, messageId: msg.message_id, query, ts: Date.now() })
   elog(`  delivering biz request biz_request_id=${biz_request_id}`)
