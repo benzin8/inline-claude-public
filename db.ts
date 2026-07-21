@@ -12,12 +12,42 @@ db.pragma('journal_mode = WAL')
 db.exec(`CREATE TABLE IF NOT EXISTS chat_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT NOT NULL,
+  agent_id TEXT,
+  user_id TEXT,
   role TEXT NOT NULL,
   sender_name TEXT,
   text TEXT NOT NULL,
   ts INTEGER NOT NULL
 )`)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_chat ON chat_history (chat_id, ts)`)
+
+// --- Migration (idempotent): per-agent columns for the multi-agent model.
+// Each chat is served by its own agent, so agent_id == chat_id by default; user_id
+// is the sender's telegram id (differs from chat_id in groups/biz). Fresh installs
+// get the columns from CREATE TABLE above; pre-existing DBs are patched here.
+{
+  const cols = db.prepare(`PRAGMA table_info(chat_history)`).all() as Array<{ name: string }>
+  const hasCol = (n: string) => cols.some(c => c.name === n)
+  if (!hasCol('agent_id')) db.exec(`ALTER TABLE chat_history ADD COLUMN agent_id TEXT`)
+  if (!hasCol('user_id')) db.exec(`ALTER TABLE chat_history ADD COLUMN user_id TEXT`)
+  // Backfill legacy rows: agent_id = chat_id (by the agent-per-chat design).
+  db.exec(`UPDATE chat_history SET agent_id = chat_id WHERE agent_id IS NULL`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent ON chat_history (agent_id, ts)`)
+}
+
+// Cross-agent access grants. By default an agent may read ONLY its own chat's rows;
+// a row here explicitly allows grantee_agent to access target_agent's data under a
+// scope. Grants are owner-gated: granted_by must be the owner — nothing is granted
+// automatically, keeping biz/guest chats isolated unless дима approves.
+db.exec(`CREATE TABLE IF NOT EXISTS access_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  grantee_agent TEXT NOT NULL,
+  target_agent TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'read',
+  granted_by TEXT NOT NULL,
+  granted_at INTEGER NOT NULL,
+  UNIQUE(grantee_agent, target_agent, scope)
+)`)
 
 db.exec(`CREATE TABLE IF NOT EXISTS contacts (
   chat_id TEXT PRIMARY KEY,
@@ -33,7 +63,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS contacts (
 )`)
 
 const insertStmt = db.prepare(
-  `INSERT INTO chat_history (chat_id, role, sender_name, text, ts) VALUES (?, ?, ?, ?, ?)`,
+  `INSERT INTO chat_history (chat_id, agent_id, user_id, role, sender_name, text, ts) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 )
 const historyStmt = db.prepare(
   `SELECT role, sender_name, text FROM chat_history WHERE chat_id = ? ORDER BY ts DESC LIMIT ?`,
@@ -48,8 +78,15 @@ const contactUpsertStmt = db.prepare(`INSERT INTO contacts
     premium=excluded.premium, common_chats_count=excluded.common_chats_count, fetched_at=excluded.fetched_at`)
 const contactStmt = db.prepare(`SELECT * FROM contacts WHERE chat_id = ?`)
 
-export function saveMessage(chatId: string, role: 'user' | 'assistant', text: string, senderName?: string): void {
-  insertStmt.run(chatId, role, senderName ?? null, text, Date.now())
+export function saveMessage(
+  chatId: string,
+  role: 'user' | 'assistant',
+  text: string,
+  senderName?: string,
+  userId?: string,
+): void {
+  // agent_id == chat_id: each chat is served by its own per-chat agent.
+  insertStmt.run(chatId, chatId, userId ?? null, role, senderName ?? null, text, Date.now())
 }
 
 /** True if we've never logged a message for this chat before (i.e. this is their first contact). */
@@ -99,4 +136,34 @@ export function getHistory(chatId: string, limit = 20): string {
       return `[${who}]: ${truncated}`
     })
     .join('\n')
+}
+
+// --- Cross-agent access grants (owner-gated) ---------------------------------
+const grantInsertStmt = db.prepare(`INSERT INTO access_grants
+  (grantee_agent, target_agent, scope, granted_by, granted_at)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(grantee_agent, target_agent, scope) DO UPDATE SET
+    granted_by=excluded.granted_by, granted_at=excluded.granted_at`)
+const grantCheckStmt = db.prepare(
+  `SELECT 1 FROM access_grants WHERE grantee_agent = ? AND target_agent = ? AND scope = ? LIMIT 1`,
+)
+const grantRevokeStmt = db.prepare(
+  `DELETE FROM access_grants WHERE grantee_agent = ? AND target_agent = ? AND scope = ?`,
+)
+
+/** Allow granteeAgent to access targetAgent's data under `scope`. Owner-gated: the
+ *  caller must pass the owner's id as grantedBy (enforcement lives in the caller). */
+export function grantAccess(granteeAgent: string, targetAgent: string, grantedBy: string, scope = 'read'): void {
+  grantInsertStmt.run(granteeAgent, targetAgent, scope, grantedBy, Date.now())
+}
+
+export function revokeAccess(granteeAgent: string, targetAgent: string, scope = 'read'): void {
+  grantRevokeStmt.run(granteeAgent, targetAgent, scope)
+}
+
+/** True if granteeAgent may access targetAgent under `scope`. An agent always has
+ *  access to its own data (grantee == target). */
+export function hasAccess(granteeAgent: string, targetAgent: string, scope = 'read'): boolean {
+  if (granteeAgent === targetAgent) return true
+  return grantCheckStmt.get(granteeAgent, targetAgent, scope) !== undefined
 }

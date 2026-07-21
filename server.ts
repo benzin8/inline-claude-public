@@ -369,7 +369,13 @@ function isReplyToOurMsg(chatId: number, replyToMsgId: number | undefined): bool
 // on ordinary conversation that just happened to mention "клод" mid-sentence without
 // actually addressing the bot (e.g. a business chat discussing an unrelated bug that
 // mentioned Claude by name). Explicit start-of-message keeps that intentional.
-const TRIGGER_WORD_RE = /^\s*(клод|claude)\b/i
+//
+// NOTE (2026-07-16): must NOT use \b after "клод" — JS \b/\w are ASCII-only, so a word
+// boundary never matches after a Cyrillic letter, which silently broke the "клод" trigger
+// entirely (only Latin "claude" still fired) from 2026-07-15 until now. Use a negative
+// lookahead for "next char is a letter" instead — that's a Unicode-safe whole-word guard:
+// "клод,"/"клод "/"клод"(eol) all trigger; "клодзилла" does not.
+const TRIGGER_WORD_RE = /^\s*(клод|claude)(?![а-яёa-z])/i
 function hasTriggerWord(text: string): boolean {
   return TRIGGER_WORD_RE.test(text)
 }
@@ -397,8 +403,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           biz_request_id: { type: 'string', description: 'biz_request_id from the [[biz:...]] bridge trigger' },
-          text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path is set. Not required if rich_markdown is set.' },
+          text: { type: 'string', description: 'the reply text (max ~4096 chars); used as caption when photo_path or file_path is set. Not required if rich_markdown is set.' },
           photo_path: { type: 'string', description: 'absolute path to a local image file to send as a photo (optional)' },
+          file_path: { type: 'string', description: 'absolute path to a local file (any type — html, pdf, zip, etc.) to send as a document attachment (optional). Use this when the recipient needs an actual downloadable file rather than a link.' },
           reply_to: { type: 'boolean', description: 'if true, reply directly to the triggering message (quote-reply)' },
           buttons: {
             type: 'array',
@@ -505,6 +512,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const biz_request_id = String(args.biz_request_id)
       let text = String(args.text ?? '')
       const photoPath = args.photo_path ? String(args.photo_path) : undefined
+      const filePath = args.file_path ? String(args.file_path) : undefined
       const replyTo = Boolean(args.reply_to)
       const richMarkdown = args.rich_markdown ? String(args.rich_markdown) : undefined
       const p = bizPending.get(biz_request_id)
@@ -561,6 +569,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams, ...markupParams },
         )
         sentMsgId = sent?.message_id
+      } else if (filePath) {
+        if (p.placeholderMsgId) {
+          (bot.api.raw.deleteMessage as unknown as (params: Record<string, unknown>) => Promise<unknown>)({
+            business_connection_id: p.businessConnectionId, chat_id: p.chatId, message_id: p.placeholderMsgId,
+          }).catch(e => elog(`  placeholder delete failed: ${e}`))
+        }
+        const { InputFile } = await import('grammy')
+        const sent = await (bot.api.sendDocument as unknown as (chatId: number, doc: unknown, opts: Record<string, unknown>) => Promise<{ message_id: number }>)(
+          p.chatId,
+          new InputFile(filePath),
+          { caption: text, parse_mode: 'HTML', business_connection_id: p.businessConnectionId, ...replyParams, ...markupParams },
+        )
+        sentMsgId = sent?.message_id
       } else if (p.placeholderMsgId) {
         // Edit the "💬 Думаю..." placeholder in place instead of sending a new message.
         await (bot.api as unknown as { raw: { editMessageText: (params: Record<string, unknown>) => Promise<unknown> } }).raw.editMessageText({
@@ -590,7 +611,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       bizPending.delete(biz_request_id)
       cleanupBridgeMsg(`biz:${biz_request_id}`)
       saveMessage(String(p.chatId), 'assistant', String(args.text ?? ''))
-      elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} len=${text.length}`)
+      elog(`business_reply OK biz_request_id=${biz_request_id} photo=${photoPath ?? 'none'} file=${filePath ?? 'none'} len=${text.length}`)
       return { content: [{ type: 'text', text: `replied in business chat (request ${biz_request_id})` }] }
     }
     if (req.params.name === 'business_send') {
@@ -843,7 +864,7 @@ bot.on('business_message', async ctx => {
   // Save every incoming business message to history (all contacts, not just triggers)
   const chatIdStr = String(chatId)
   fetchContactInfoIfNew(chatIdStr) // must run BEFORE saveMessage, or isNewChat would already see this message
-  if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined)
+  if (text) saveMessage(chatIdStr, 'user', text, msg.from?.first_name ?? undefined, msg.from?.id != null ? String(msg.from.id) : undefined)
 
   // Trigger if: message mentions the bot/клод, OR is a reply to one of our messages.
   // Video notes (кружки) can't carry a caption in Telegram — to trigger on one, reply
@@ -879,7 +900,7 @@ bot.on('business_message', async ctx => {
   }).catch(e => elog(`  placeholder send failed: ${e}`))
 
   // Also check reply_to_message — owner can reply to a voice/photo with "Клод, расшифруй"
-  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; video?: { file_id: string }; sticker?: { file_id: string; emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean }; text?: string; caption?: string }
+  type AnyMsg = { photo?: Array<{ file_id: string }>; voice?: { file_id: string }; video_note?: { file_id: string }; video?: { file_id: string }; sticker?: { file_id: string; emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean }; document?: { file_id: string; file_name?: string; mime_type?: string }; text?: string; caption?: string }
   const replyMsg = (msg as unknown as { reply_to_message?: AnyMsg }).reply_to_message
   const msgCast = msg as unknown as AnyMsg
   // Plain-text reply target (no photo/voice/video_note of its own) — surface the quoted
@@ -1005,6 +1026,31 @@ bot.on('business_message', async ctx => {
     }
   }
 
+  // Download a generic document/file (anything sent as a Telegram document rather than
+  // photo/voice/video/sticker — .txt, .pdf, .py, .json, .zip, etc.) if present in the
+  // trigger message or a replied-to message. Preserve the original filename so Claude's
+  // Read tool can pick the right parser by extension (e.g. .pdf). getFile still caps out
+  // at ~20MB, same limitation as video above.
+  let documentPath: string | undefined
+  let documentName: string | undefined
+  const document = msgCast.document ?? replyMsg?.document
+  if (document) {
+    try {
+      mkdirSync(join(HERE, 'tmp'), { recursive: true })
+      const fileInfo = await bot.api.getFile(document.file_id)
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
+      const resp = await fetch(url)
+      const buf = await resp.arrayBuffer()
+      documentName = document.file_name ?? `file_${biz_request_id}`
+      const safeName = documentName.replace(/[/\\]/g, '_')
+      documentPath = join(HERE, 'tmp', `biz_document_${biz_request_id}_${safeName}`)
+      writeFileSync(documentPath, Buffer.from(buf))
+      elog(`  document saved: ${documentPath}`)
+    } catch (e) {
+      elog(`  document download failed: ${e}`)
+    }
+  }
+
   // Deliver via bridge (same pattern as inline fallback)
   const senderTag = fromId === Number(OWNER_ID)
     ? `role=owner biz_chat=${chatId}`
@@ -1018,6 +1064,7 @@ bot.on('business_message', async ctx => {
   if (stickerPath) queryFinal += ` [STICKER:${stickerPath}]`
   if (stickerVideoPath) queryFinal += ` [STICKER_VIDEO:${stickerVideoPath}]`
   if (stickerInfo) queryFinal += ` [STICKER_INFO:${stickerInfo}]`
+  if (documentPath) queryFinal += ` [DOCUMENT:${documentPath}]`
   deliverViaBridge(`biz:${biz_request_id}`, queryFinal, senderTag)
 })
 
@@ -1064,14 +1111,17 @@ bot.command('ask', async ctx => {
 // video/video_note/sticker). Mirrors the business_message download blocks further
 // up but with a fresh generated filename instead of biz_request_id, since the chat
 // path doesn't have a request id allocated until after gating passes.
-async function downloadTgFile(fileId: string, prefix: string, ext: string): Promise<string | undefined> {
+async function downloadTgFile(fileId: string, prefix: string, ext: string, originalName?: string): Promise<string | undefined> {
   try {
     mkdirSync(join(HERE, 'tmp'), { recursive: true })
     const fileInfo = await bot.api.getFile(fileId)
     const url = `https://api.telegram.org/file/bot${TOKEN}/${fileInfo.file_path}`
     const resp = await fetch(url)
     const buf = await resp.arrayBuffer()
-    const path = join(HERE, 'tmp', `${prefix}_${newId()}.${ext}`)
+    // Documents keep their original filename (sans path separators) so Read can pick
+    // the right parser by extension; everything else uses the fixed prefix.ext scheme.
+    const filename = originalName ? `${prefix}_${newId()}_${originalName.replace(/[/\\]/g, '_')}` : `${prefix}_${newId()}.${ext}`
+    const path = join(HERE, 'tmp', filename)
     writeFileSync(path, Buffer.from(buf))
     elog(`  ${prefix} saved: ${path}`)
     return path
@@ -1087,6 +1137,7 @@ type ChatAttachment =
   | { kind: 'video'; fileId: string }
   | { kind: 'video_note'; fileId: string }
   | { kind: 'sticker'; fileId: string; isAnimated?: boolean; isVideo?: boolean; emoji?: string; setName?: string }
+  | { kind: 'document'; fileId: string; fileName?: string }
 
 // One handler for the whole 'message' update, inspecting fields directly, instead of
 // separate bot.on('message:photo')/('message:caption') registrations — grammY runs
@@ -1144,6 +1195,9 @@ async function maybeHandleChatMessage(
         const p = await downloadTgFile(attachment.fileId, 'chat_sticker', 'webp')
         if (p) marker = ` [STICKER:${p}]`
       }
+    } else if (attachment.kind === 'document') {
+      const p = await downloadTgFile(attachment.fileId, 'chat_document', '', attachment.fileName)
+      if (p) marker = ` [DOCUMENT:${p}]`
     }
   }
 
@@ -1159,6 +1213,7 @@ type MsgLike = {
   video?: { file_id: string }
   video_note?: { file_id: string }
   sticker?: { file_id: string; is_animated?: boolean; is_video?: boolean; emoji?: string; set_name?: string }
+  document?: { file_id: string; file_name?: string }
 }
 function extractAttachment(m: MsgLike | undefined): ChatAttachment | undefined {
   if (!m) return undefined
@@ -1167,6 +1222,7 @@ function extractAttachment(m: MsgLike | undefined): ChatAttachment | undefined {
   if (m.video) return { kind: 'video', fileId: m.video.file_id }
   if (m.video_note) return { kind: 'video_note', fileId: m.video_note.file_id }
   if (m.sticker) return { kind: 'sticker', fileId: m.sticker.file_id, isAnimated: m.sticker.is_animated, isVideo: m.sticker.is_video, emoji: m.sticker.emoji, setName: m.sticker.set_name }
+  if (m.document) return { kind: 'document', fileId: m.document.file_id, fileName: m.document.file_name }
   return undefined
 }
 
