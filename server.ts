@@ -889,7 +889,13 @@ bot.on('business_message', async ctx => {
   const lower = text.toLowerCase()
   const replyToMsgId = (msg as unknown as { reply_to_message?: { message_id?: number } }).reply_to_message?.message_id
   const isReplyToUs = isReplyToOurMsg(chatId, replyToMsgId)
-  if (!lower.includes('@claude_inline_bot') && !hasTriggerWord(text) && !isReplyToUs) {
+  // In a dedicated agent chat, ANY reply from the owner (дима) triggers the agent — even if
+  // the replied-to message isn't in our tracked set (e.g. sent before a restart, or a reply
+  // to the counterpart's message). дима chose "клод / reply" triggering; this makes the reply
+  // half reliable regardless of tracking state.
+  const isOwnerReplyInAgentChat =
+    AGENT_CHATS.has(chatIdStr) && !!replyToMsgId && String(msg.from?.id) === OWNER_ID
+  if (!lower.includes('@claude_inline_bot') && !hasTriggerWord(text) && !isReplyToUs && !isOwnerReplyInAgentChat) {
     elog('  business_message: no trigger, skipping')
     return
   }
